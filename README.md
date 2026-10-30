@@ -1,5 +1,7 @@
 # SurfCore macOS 魔改版
 
+> 当前版本：**v0.6.22-mod.1** · 更新日志见 [CHANGELOG.md](CHANGELOG.md) · 发布约定见 [VERSIONS.md](VERSIONS.md)
+
 > 在 macOS 上跑起来、并且加了一堆「群友想要」的功能的 [SurfCore](https://github.com/Mieksido/surfcore) 分支。
 >
 > 原项目：DSH（DeepSeek Harness）的 QQ 桥接插件 + 桥接进程，作者 Mieksido，MIT 许可。
