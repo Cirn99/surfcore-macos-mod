@@ -23,6 +23,15 @@ if ! grep -q "## \[${VERSION}\]" CHANGELOG.md; then
   echo "CHANGELOG.md 里没有 ## [${VERSION}] 条目，先补上" >&2
   exit 1
 fi
+# README 顶部版本行随 Release 自动同步
+sed -i '' -E "s/> 当前版本：\*\*v[0-9A-Za-z._-]+\*\*/> 当前版本：**v${VERSION}**/" README.md 2>/dev/null || \
+  sed -i -E "s/> 当前版本：\*\*v[0-9A-Za-z._-]+\*\*/> 当前版本：**v${VERSION}**/" README.md
+if [ -n "$(git status --porcelain README.md)" ]; then
+  git add README.md
+  git commit -q -m "docs: README 版本行同步到 v${VERSION}"
+  echo "README 版本行已同步到 v${VERSION} 并提交"
+fi
+
 if [ -n "$(git status --porcelain)" ]; then
   echo "工作区不干净，先 commit" >&2
   exit 1
