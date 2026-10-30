@@ -2789,6 +2789,9 @@ async function main() {
     const cfgImg = cfg.socialV2?.image ?? {};
     const cdpUrl = String(cfgImg.cdpUrl || 'http://127.0.0.1:9222').replace(/\/+$/, '');
     const text = String(prompt ?? '').trim().slice(0, 300);
+    // 每次都给豆包追加「只生成一张」的约束，避免某些模式下一次出多张
+    const suffix = String(cfgImg.promptSuffix ?? '只生成 1 张图片，不要多张。');
+    const sendText = suffix && !text.includes('1 张') ? text + '\n' + suffix : text;
     if (!text) throw new Error('画图提示词不能为空');
 
     const cdp = await cdpConnect(cdpUrl);
@@ -2838,7 +2841,7 @@ async function main() {
         return true;
       })()`);
       if (!focused) throw new Error('找不到豆包输入框');
-      await call('Input.insertText', { text });
+      await call('Input.insertText', { text: sendText });
       await new Promise((r) => setTimeout(r, 600));
       await call('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13 });
       await call('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13 });
@@ -2850,7 +2853,7 @@ async function main() {
         await new Promise((r) => setTimeout(r, 3000));
         const now = await evalJs(`JSON.stringify([...document.images].filter(i => i.naturalWidth >= 1000 && /rc_gen_image|byteimg/.test(i.currentSrc || i.src)).map(i => i.currentSrc || i.src))`);
         const urls = JSON.parse(now || '[]').filter((u) => !beforeSet.has(u));
-        if (urls.length) { imageUrl = urls[urls.length - 1]; break; }
+        if (urls.length) { imageUrl = urls[0]; break; } // 一次只取一张：固定取本轮出现的第一张新图
       }
       if (!imageUrl) throw new Error('等图超时（150 秒内没看到新图）');
 
@@ -5146,6 +5149,67 @@ async function main() {
         }
 
         // ── 黑话库管理 ──────────────────────────────────────────────────────
+        if (req.method === 'GET' && url.pathname === '/api/socialV2/mods-status') {
+          try {
+            const today = new Date().toISOString().slice(0, 10);
+            const ttsLast = Math.max(0, ...[...ttsLastAt.values()].map(Number));
+            let collectedToday = 0;
+            for (const st of socialV2.conversations.values()) {
+              if (st && st.faceCollectDay === today) collectedToday += Number(st.faceCollectCount) || 0;
+            }
+            let drawsToday = 0;
+            for (const [key, day] of drawDay.entries()) {
+              if (day === today) drawsToday += Number(drawCount.get(key)) || 0;
+            }
+            const drawLast = Math.max(0, ...[...drawLastAt.values()].map(Number));
+            const sessions = [];
+            for (const [key, st] of socialV2.conversations.entries()) {
+              if (!st) continue;
+              sessions.push({
+                key,
+                turns: Number(st.sessionTurns) || 0,
+                startedAt: Number(st.sessionStartedAt) || 0
+              });
+            }
+            const cdpUrl = String(cfg.socialV2?.image?.cdpUrl || 'http://127.0.0.1:9222').replace(/\/+$/, '');
+            let doubao = { online: false };
+            try {
+              const r = await fetch(`${cdpUrl}/json/version`, { signal: AbortSignal.timeout(1200) });
+              if (r.ok) { const j = await r.json(); doubao = { online: true, browser: String(j.Browser || '') }; }
+            } catch {}
+            sendJson({
+              ok: true,
+              voice: {
+                provider: String(cfg.socialV2?.voice?.provider || 'breeze'),
+                gapMs: Math.max(60000, Number(cfg.socialV2?.voice?.minGapMs) || 180000),
+                lastAt: ttsLast
+              },
+              stickers: {
+                count: Array.isArray(stickerEntries) ? stickerEntries.length : 0,
+                collectedToday,
+                chance: Number(cfg.socialV2?.sticker?.autoAttachChance ?? 0.6)
+              },
+              draw: {
+                today: drawsToday,
+                maxPerDay: Math.max(1, Number(cfg.socialV2?.image?.maxPerDay) || 15),
+                lastAt: drawLast,
+                gapMs: Math.max(10000, Number(cfg.socialV2?.image?.minGapMs) || 60000)
+              },
+              sessions,
+              rotation: {
+                enabled: cfg.socialV2?.sessionRotation?.enabled !== false,
+                maxTurns: Math.max(20, Number(cfg.socialV2?.sessionRotation?.maxTurns) || 120),
+                maxAgeHours: Math.max(1, Number(cfg.socialV2?.sessionRotation?.maxAgeHours) || 12)
+              },
+              doubao,
+              now: Date.now()
+            });
+          } catch (error) {
+            sendJson({ ok: false, error: error?.message ?? String(error) }, 500);
+          }
+          return;
+        }
+
         if (req.method === 'GET' && url.pathname === '/api/slang') {
           const status = url.searchParams.get('status') || '';
           const list = status ? slangEntries.filter((e) => e.status === status) : slangEntries;
