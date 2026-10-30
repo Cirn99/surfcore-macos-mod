@@ -1,0 +1,9 @@
+node_modules/
+state/
+config.json
+config.json.bak-*
+*.bak-*
+*.log
+assets/
+plugins/surfcore/tools/bin/
+.DS_Store
