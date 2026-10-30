@@ -5,6 +5,14 @@
 
 上游更新日志见 [CHANGELOG.upstream.md](CHANGELOG.upstream.md)。
 
+## [0.6.22-mod.3] - 2026-10-30
+
+### 发布自动化
+
+- 新增 `scripts/bili-autopublish.py`：投稿后轮询审核状态，通过后自动把「仅自己可见」改成公开
+- 复用 bili-cli 的 archive 读取与 edit 载荷构造，只补 `is_only_self=0`
+- 用法：`python3 scripts/bili-autopublish.py --bvid BVxxx --wait 21600 --public`
+
 ## [0.6.22-mod.2] - 2026-10-30
 
 ### 发布与版本
