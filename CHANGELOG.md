@@ -5,6 +5,19 @@
 
 上游更新日志见 [CHANGELOG.upstream.md](CHANGELOG.upstream.md)。
 
+## [0.6.22-mod.2] - 2026-10-30
+
+### 发布与版本
+
+- 新增 `scripts/release.sh`：一条命令完成打包、打 tag、推 main、建 Release、上传源码 zip
+- 每个 Release 都附带 `surfcore-macos-mod-<version>.zip`，老版本永久可下载
+- 补发 `v0.6.22-mod.1` 的源码 zip 附件
+- `VERSIONS.md` 补充附件与历史版本说明
+
+### 文档
+
+- README 版本行同步到 mod.2
+
 ## [0.6.22-mod.1] - 2026-10-30
 
 首个公开版本：在 macOS 上跑通 SurfCore，并加入语音、表情包、梗百科、豆包生图等功能。
