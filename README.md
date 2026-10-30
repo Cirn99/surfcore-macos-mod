@@ -1,6 +1,6 @@
 # SurfCore macOS 魔改版
 
-> 当前版本：**v0.6.22-mod.1** · 更新日志见 [CHANGELOG.md](CHANGELOG.md) · 发布约定见 [VERSIONS.md](VERSIONS.md)
+> 当前版本：**v0.6.22-mod.4** · 更新日志见 [CHANGELOG.md](CHANGELOG.md) · 发布约定见 [VERSIONS.md](VERSIONS.md)
 
 > 在 macOS 上跑起来、并且加了一堆「群友想要」的功能的 [SurfCore](https://github.com/Mieksido/surfcore) 分支。
 >
