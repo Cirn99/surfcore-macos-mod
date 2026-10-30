@@ -758,16 +758,12 @@ window.__ModuleLoader__.load({
         F("workspaceTitle", "工作区名称", "QQ 会话在 DSH 里的归组名"),
 F("sessionCwd", "会话工作目录", "留空用 surfcore 根目录", "text", { browse: "dir" }),
       ]},
-      { group: "SnowLuma", note: "OneBot 网关；「一键启动」只在你点击时打开本机已安装的 SnowLuma 窗口，不安装、不部署、不代扫码", fields: [
+      { group: "OneBot 网关（NapCat）", note: "macOS 用 NapCat 顶替 SnowLuma；端口与 token 要和 NapCat 配置一致", fields: [
         F("snowluma.wsUrl", "OneBot WebSocket", "例如 ws://127.0.0.1:3001"),
         F("snowluma.httpUrl", "OneBot HTTP", "例如 http://127.0.0.1:3000（不能和 WS 同端口）"),
-        F("snowluma.accessToken", "OneBot accessToken", "SnowLuma 里配置的 token", "password"),
+        F("snowluma.accessToken", "OneBot accessToken", "NapCat 里配置的 token", "password"),
         F("snowluma.followDiscoveredEndpoint", "跟随自发现端点", "网关换端口时自动跟随", "switch"),
         F("snowluma.silenceWarnMs", "静默告警阈值（ms）", "多久没事件包就警告", "number", { min: 60000 }),
-        F("snowluma.allowLaunch", "允许插件打开 SnowLuma", "默认关；开启后一键启动会弹出 SnowLuma 窗口，仍需你扫码", "switch"),
-        F("snowluma.launcherPath", "SnowLuma 安装目录", "解压出来的根目录（里面有 app）；例如 D:/Tools/SnowLuma2", "text", { browse: "dir" }),
-        F("snowluma.launchScript", "启动脚本（可选）", "留空自动找 安装目录\\app\\launcher.bat", "text", { wide: true }),
-        F("snowluma.homeDir", "SnowLuma home（app 目录）", "内含 config 的那个目录，一般是 安装目录 下的 app；填错会导致「检测不到」", "text", { browse: "dir" }),
       ]},
       { group: "控制台", note: "桥接本地控制台", fields: [
         F("consolePort", "控制台端口", "默认 3100", "number", { min: 1024, max: 65535 }),
@@ -975,6 +971,7 @@ F("sessionCwd", "会话工作目录", "留空用 surfcore 根目录", "text", { 
       getMessageDetail: "消息详情", getActiveMembers: "活跃成员", setWakeConfig: "设置唤醒",
       markRead: "标记已读", closeConversation: "对话收尾", memory: "轻量记忆", slangQuery: "查黑话", slangSubmit: "提交黑话",      getImages: "看图", getForwardMsg: "看合并转发", sendPoke: "拍一拍", listStickers: "表情列表",
       getStickerImage: "表情图片", sendSticker: "发表情", setStickerRemark: "改表情备注",
+      sendTts: "发语音（TTS）", meme: "梗百科查询", draw: "豆包生图",
       stickerNote: "表情笔记", collectSticker: "收藏表情", getSelfImage: "看自己形象", sendVoice: "发语音",
     };
 
@@ -1248,6 +1245,19 @@ F("toolsPath", "bili.mjs 路径", "留空 = 用合体插件自带的 tools/", "t
       const align = overview?.alignment ?? {};
       const scheduler = overview?.scheduler ?? {};
       const snow = overview?.snowluma ?? {};
+      const [mods, setMods] = useState(null);
+      useEffect(() => {
+        let alive = true;
+        const loadMods = async () => {
+          try {
+            const r = await api("/socialV2/mods-status");
+            if (alive) setMods(r);
+          } catch {}
+        };
+        loadMods();
+        const timer = setInterval(loadMods, 15000);
+        return () => { alive = false; clearInterval(timer); };
+      }, []);
       const platformStart = overview?.platformStart ?? {};
       const qqStart = platformStart.qq !== false;
       const biliStart = platformStart.bili !== false;
@@ -1332,6 +1342,18 @@ F("toolsPath", "bili.mjs 路径", "留空 = 用合体插件自带的 tools/", "t
             h("div", { className: "qbw-actions" },
               h(Btn, { kind: "qbw-btn2", onClick: () => act("refresh-bili"), disabled: !!busy }, "刷新 B站记忆"))),
           h("div", { className: "qbw-card" },
+            h("h4", null, "魔改状态"),
+            !mods ? h("div", { className: "qbw-hint" }, "读取中…") : h("div", null,
+              h("div", { className: "qbw-kv" }, h("span", null, "语音"), h("span", null,
+                mods.voice?.lastAt ? `上次 ${Math.max(0, Math.round((Date.now() - mods.voice.lastAt) / 60000))} 分钟前 · CD ${Math.round((mods.voice.gapMs || 180000) / 60000)} 分钟` : `还没发过 · CD ${Math.round((mods.voice?.gapMs || 180000) / 60000)} 分钟`)),
+              h("div", { className: "qbw-kv" }, h("span", null, "表情库"), h("span", null,
+                `${mods.stickers?.count ?? 0} 张 · 今日自动收 ${mods.stickers?.collectedToday ?? 0} 张 · 配图概率 ${Math.round((mods.stickers?.chance ?? 0.6) * 100)}%`)),
+              h("div", { className: "qbw-kv" }, h("span", null, "豆包生图"), h("span", null,
+                `今日 ${mods.draw?.today ?? 0}/${mods.draw?.maxPerDay ?? 15} 张 · ${mods.doubao?.online ? "CDP 在线" : "CDP 离线"}`)),
+              h("div", { className: "qbw-kv" }, h("span", null, "会话轮换"), h("span", null,
+                (mods.sessions || []).map((x) => `${String(x.key).replace(/^(group|private):/, "")}:${x.turns}/${mods.rotation?.maxTurns ?? 120} 轮`).join(" · ") || "暂无会话")),
+              h("div", { className: "qbw-hint" }, "每 15 秒自动刷新；改完保存即生效（部分需重启桥接）。"))),
+          h("div", { className: "qbw-card" },
             h("h4", null, "启动"),
             h("div", { className: "qbw-hint", style: { marginBottom: "8px" } },
               "一键启动会按 QQ / B站 页里的「是否启动」开关拉起对应平台；也可以只启动一边。",
@@ -1344,7 +1366,7 @@ F("toolsPath", "bili.mjs 路径", "留空 = 用合体插件自带的 tools/", "t
               h("span", null, "B站"),
               h("span", null, biliStart ? (scheduler.running ? "启动开关开 · 生物钟在跑" : "启动开关开 · 未运行") : "启动开关关")),
             h("div", { className: "qbw-actions" },
-              h(Btn, { onClick: () => act("start-all"), disabled: !!busy || (!qqStart && !biliStart) }, "一键启动（含 SnowLuma）"),
+              h(Btn, { onClick: () => act("start-all"), disabled: !!busy || (!qqStart && !biliStart) }, "一键启动"),
               h(Btn, { kind: "qbw-btn2", onClick: () => act("start-qq"), disabled: !!busy || !qqStart || Boolean(bridge.running) }, "启动QQ"),
               h(Btn, { kind: "qbw-btn2", onClick: () => act("start-bili"), disabled: !!busy || !biliStart || Boolean(scheduler.running) }, "启动B站")),
             h("div", { className: "qbw-actions", style: { borderTop: "none", marginTop: "2px", paddingTop: "2px" } },
@@ -1394,16 +1416,11 @@ F("toolsPath", "bili.mjs 路径", "留空 = 用合体插件自带的 tools/", "t
                 ? h(Btn, { kind: "qbw-btn2", onClick: () => window.open((updates.results ?? []).find((x) => x.updateAvailable && x.downloadUrl).downloadUrl, "_blank", "noopener") }, "去下载新版")
                 : null,
               h(Btn, { kind: "qbw-btn2", onClick: () => setUpdateOpen(true), disabled: !(updates.results ?? []).length }, "查看详情"))),
-          h(AdvancedSettings, { note: "SnowLuma 安装 / 扩展与平台：装好后很少改" },
+          h(AdvancedSettings, { note: "扩展与平台：装好后很少改" },
             h("div", { className: "qbw-card" },
-              h("h4", null, "SnowLuma 安装"),
-              h("p", null, "第一次使用：下载官方 SnowLuma2 → 解压 → 点「检测已安装的 SnowLuma」→ 启动 QQ 并扫码。"),
-              h("div", { className: "qbw-kv" }, h("span", null, "当前安装目录"), h("span", null, snow.launcherPath || "未设置")),
-              h("div", { className: "qbw-actions" },
-                h(Btn, { kind: "qbw-btn2", onClick: () => window.open(snow.downloadUrl || "https://github.com/SnowLuma/SnowLuma/releases/latest", "_blank", "noopener") }, "打开官方下载页"),
-                h(Btn, { onClick: detectSnowLuma, disabled: !!busy }, "检测已安装的 SnowLuma"),
-                h(Btn, { kind: "qbw-btn2", onClick: () => act("start-snowluma"), disabled: !!busy }, "只打开 SnowLuma")),
-              h("div", { className: "qbw-hint" }, "SurfCore 只负责检测、打开和查看连接状态；SnowLuma2 本体按 EULA 不随插件分发，安装与扫码仍需你完成。")),
+              h("h4", null, "OneBot 后端（macOS）"),
+              h("p", null, "这个分支在 macOS 上用 NapCat 作为 OneBot 11 后端，不再使用 Windows 专用的 SnowLuma。"),
+              h("div", { className: "qbw-hint" }, "NapCat 安装后把端口/token 填到 QQ 页「OneBot 网关（NapCat）」分组即可；检测/启动 SnowLuma 的按钮已移除。")),
             h("div", { className: "qbw-card" },
               h("h4", null, "扩展与平台"),
               h("div", { className: "qbw-kv" }, h("span", null, "已启用扩展"), h("span", null, `${(overview?.extensions ?? []).filter((x) => x.enabled).length} / ${(overview?.extensions ?? []).length}`)),
@@ -1725,7 +1742,7 @@ F("toolsPath", "bili.mjs 路径", "留空 = 用合体插件自带的 tools/", "t
         cursor: "pointer",
         boxShadow: active ? "0 0 0 2px rgba(106,169,255,.14)" : "none",
       });
-      const petText = !status ? "读取中…"
+      const petText = "macOS 版不支持桌宠（该功能已从界面移除）"; const __petUnused = !status ? "读取中…"
         : !pet.installed ? "未安装桌宠：先去「桌宠」页安装，再回来选"
         : !pet.running ? "已安装 · 未运行（去「桌宠」页启动）"
         : pet.online ? `在线${pet.roleName ? ` · 角色「${pet.roleName}」` : ""}`
@@ -1743,7 +1760,7 @@ F("toolsPath", "bili.mjs 路径", "留空 = 用合体插件自带的 tools/", "t
             h("div", { style: { fontWeight: 600, fontSize: "13px" } }, "QQ 私聊（默认）"),
             h("div", { className: "qbw-hint" }, qqText),
             h("div", { className: "qbw-hint" }, "没安装桌宠的用户保持这一项即可。")),
-          h("div", { style: cardStyle(carrier === "pet"), onClick: () => choose("pet"), role: "button" },
+          h("div", { style: cardStyle(carrier === "pet"), onClick: () => { /* macOS 不支持 */ }, role: "button" },
             h("div", { style: { fontWeight: 600, fontSize: "13px" } }, "桌宠气泡 / 语音"),
             h("div", { className: "qbw-hint" }, petText),
             h("div", { className: "qbw-hint" }, "在桌面上说话：语音会念出来，气泡里始终显示文字。"))),
@@ -1824,7 +1841,7 @@ F("toolsPath", "bili.mjs 路径", "留空 = 用合体插件自带的 tools/", "t
         h(PetChatTestCard, { toast }),
         h("div", { className: "qbw-hint", style: { marginTop: "6px" } },
           "桌宠的安装/启动、对话参数在「桌宠」页；人设与记忆在「角色 / 记忆」页。",
-          goTab ? h(Btn, { kind: "qbw-btn2", onClick: () => goTab("pet"), style: { marginLeft: "8px" } }, "去「桌宠」页") : null));
+          h("span", { className: "qbw-hint" }, "macOS 版已移除桌宠，直接用 QQ 私聊。")));
     }
 
     // ── 对话收尾判断：每段对话有自然终点；收尾不是潜水 ──────────────────
@@ -1885,6 +1902,58 @@ F("toolsPath", "bili.mjs 路径", "留空 = 用合体插件自带的 tools/", "t
     }
 
     // ── QQ 标签页 ───────────────────────────────────────────────────────────
+    // ── 魔改（本分支新增功能，单独一栏）─────────────────────────────────────
+    function buildModsGroups() {
+      const groups = [];
+      groups.push({ group: "魔改 · 语音", note: "BreezeBlue 云端音色 + 火山兜底；填完 API Key 后点「保存并重启 QQ 桥接」才生效", fields: [
+        F("socialV2.voice.provider", "语音通道", "breeze = BreezeBlue（大肥鱼音色）；volc = 火山 Seed Audio", "select", { options: [["breeze", "BreezeBlue"], ["volc", "火山 Seed Audio"]] }),
+        F("socialV2.voice.minGapMs", "同一会话间隔（ms）", "默认 180000 = 3 分钟一条", "number", { min: 60000 }),
+        F("socialV2.voice.maxChars", "单条最多字数", "", "number", { min: 10 }),
+        F("socialV2.voice.breeze.voiceId", "BreezeBlue 音色 ID", "机灵版 voc_u3nxkd5578wc · 迷糊版 voc_8yud7hz7c9q2", "text", { wide: true }),
+        F("socialV2.voice.cloud.promptPrefix", "火山音色前缀", "只对火山通道生效，如【年轻女声，轻快】", "text", { wide: true }),
+        F("socialV2.voice.breeze.apiKey", "BreezeBlue API Key", "brz_ 开头；只保存在本机 config.json", "password", { wide: true }),
+        F("socialV2.voice.breeze.baseUrl", "BreezeBlue 地址", "默认 https://api.breeze.blue", "text", { wide: true }),
+        F("socialV2.voice.cloud.apiKey", "火山 Seed Audio Key", "火山/即梦控制台的 API Key；失败会自动回退 BreezeBlue", "password", { wide: true }),
+        F("socialV2.voice.cloud.baseUrl", "火山语音地址", "默认 https://openspeech.bytedance.com", "text", { wide: true }),
+      ]});
+      groups.push({ group: "魔改 · 表情包", note: "自动配图 / 自动收图 / 回复里的 [sticker:名字] 标记", fields: [
+        F("socialV2.sticker.autoAttachChance", "自动配图概率", "0~1，0.6 = 六成回复补一张表情", "number", { min: 0, max: 1, step: 0.05 }),
+        F("socialV2.sticker.autoCollect.enabled", "自动收藏群友表情", "只收表情类，不碰照片", "switch"),
+        F("socialV2.sticker.autoCollect.chance", "自动收藏概率", "", "number", { min: 0, max: 1, step: 0.05 }),
+        F("socialV2.sticker.autoCollect.maxPerDay", "每天最多收藏", "", "number", { min: 1 }),
+      ]});
+      groups.push({ group: "魔改 · 梗与黑话", fields: [
+        F("slang.autoConfirm", "黑话提交即生效", "关 = 进候选库等管理员确认", "switch"),
+        F("socialV2.tools.meme", "启用梗百科查询", "qq_meme：查 cnmeme.wiki", "switch"),
+      ]});
+      groups.push({ group: "魔改 · 豆包生图", note: "需要豆包客户端以 --remote-debugging-port=9222 启动（scripts/start-doubao-cdp.sh）", fields: [
+        F("socialV2.image.enabled", "启用生图", "", "switch"),
+        F("socialV2.image.cdpUrl", "CDP 地址", "默认 http://127.0.0.1:9222", "text", { wide: true }),
+        F("socialV2.image.cropWatermark", "自动裁水印", "裁掉图片底部约 6%", "switch"),
+        F("socialV2.image.minGapMs", "同一会话间隔（ms）", "默认 60000", "number", { min: 10000 }),
+        F("socialV2.image.maxPerDay", "每天最多张数", "", "number", { min: 1 }),
+        F("socialV2.tools.draw", "启用生图工具", "qq_draw", "switch"),
+      ]});
+      groups.push({ group: "魔改 · 会话轮换（省 token）", note: "上下文过大时自动重建 DSH 会话，避免每轮重发几十万 token", fields: [
+        F("socialV2.sessionRotation.enabled", "启用自动轮换", "", "switch"),
+        F("socialV2.sessionRotation.maxTurns", "最多唤醒次数", "默认 120", "number", { min: 20 }),
+        F("socialV2.sessionRotation.maxAgeHours", "最长小时数", "默认 12", "number", { min: 1 }),
+      ]});
+      groups.push({ group: "魔改 · 称呼", fields: [
+        F("socialV2.naming.group", "群里称呼主人为", "留空则不注入称呼规则，如：鱼王大人", "text"),
+        F("socialV2.naming.private", "私聊称呼", "如：主人", "text"),
+      ]});
+      return groups;
+    }
+
+    function ModsTab({ cfg, set }) {
+      return h("div", null,
+        h("div", { className: "qbw-infobox" },
+          "这些是本分支相对上游 SurfCore 的改动：语音、表情包、梗与黑话、豆包生图、会话轮换、称呼。",
+          "改完点底部「保存」生效；豆包生图需要客户端以 --remote-debugging-port=9222 启动。"),
+        h(FieldGroups, { groups: buildModsGroups(), cfg, set, readOnly: () => false }));
+    }
+
     function QQTab({ cfg, set, admin, setAdmin, unified, setUnified, overview, busy, setBusy, toast, reload, goTab }) {
       const [query, setQuery] = useState("");
       const tools = Object.keys(cfg?.socialV2?.tools ?? {});
@@ -4578,8 +4647,7 @@ F("socialV2.voice.ffmpegPath", "ffmpeg 路径", "留空走 PATH", "text", { wide
       ["characters", "角色"],
       ["purpose", "目的"],
       ["qq", "QQ"],
-      ["voice", "语音"],
-      ["pet", "桌宠"],
+      ["mods", "魔改"],
       ["bili", "B站"],
       ["tokens", "Token 额度"],
       ["watch", "观看历史"],
@@ -4771,6 +4839,7 @@ F("socialV2.voice.ffmpegPath", "ffmpeg 路径", "留空走 PATH", "text", { wide
         if (tab === "overview") return h(OverviewTab, { overview, reload, busy, setBusy, toast: notify, unified, setUnified: setUnifiedPath, goTab: setTab });
         if (tab === "characters") return h(CharactersTab, { overview, busy, setBusy, toast: notify, reload, goTab: setTab, unified, setUnified: setUnifiedPath });
         if (tab === "purpose") return h(PurposeTab, { qq, setQq: setQqPath, unified, setUnified: setUnifiedPath, overview, busy, setBusy, toast: notify, reload, goTab: setTab });
+        if (tab === "mods") return h(ModsTab, { cfg: qq, set: setQqPath });
         if (tab === "qq") return h(QQTab, { cfg: qq, set: setQqPath, admin: unified?.admin ?? {}, setAdmin, unified, setUnified: setUnifiedPath, overview, busy, setBusy, toast: notify, reload, goTab: setTab });
         if (tab === "bili") return h(BiliTab, { cfg: bili, set: setBiliPath, qq: normalizedQq, setQqPath, admin: unified?.admin ?? {}, setAdmin, unified, setUnified: setUnifiedPath, qqPrivate: normalizedQq?.allow?.private ?? [], qqAllowAll: normalizedQq?.allowAllWhenEmpty === true, overview, busy, setBusy, toast: notify, reload });
         if (tab === "tokens") return h(TokenTab, { budget, limits: limitDraft, onChange: setLimitDraft, disabled: !!busy, alertedToday: tokenAlerted, onSave: () => save(false), busy, toast: notify });
