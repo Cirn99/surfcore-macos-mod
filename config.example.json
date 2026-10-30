@@ -132,7 +132,8 @@
     "injectMax": 8,
     "learnerPreset": "qq-chat",
     "workspaceTitle": "QQ 黑话学习",
-    "autoResearch": true
+    "autoResearch": true,
+    "autoConfirm": true
   },
   "social": {
     "enabled": true,
@@ -177,6 +178,9 @@
     "agentPreset": "qq-chat-v2",
     "provideRecommendations": true,
     "tools": {
+      "sendTts": true,
+      "meme": true,
+      "draw": true,
       "getPrompt": true,
       "getUnread": true,
       "getRecent": true,
@@ -306,33 +310,24 @@
       }
     },
     "voice": {
-      "enabled": false,
-      "dir": "audio",
-      "maxSeconds": 300,
-      "maxBytes": 20971520,
-      "maxPerMinute": 2,
-      "maxPerHour": 10,
-      "allowAbsolutePath": false,
-      "defaultVolume": 1,
-      "loudness": "normal",
-      "ffmpegPath": "",
-      "autoReadback": true,
-      "tts": {
-        "enabled": false,
-        "baseUrl": "http://127.0.0.1:8765",
-        "timeoutMs": 60000,
-        "maxChars": 120,
-        "character": "",
-        "route": "local",
-        "endpoints": {
-          "local": "http://127.0.0.1:8765",
-          "cloud": "http://127.0.0.1:8767"
-        }
+      "enabled": true,
+      "provider": "breeze",
+      "minGapMs": 180000,
+      "maxChars": 120,
+      "name": "Tingting",
+      "breeze": {
+        "apiKey": "",
+        "voiceId": "",
+        "baseUrl": "https://api.breeze.blue",
+        "timeoutMs": 60000
       },
-      "trigger": {
-        "who": "owner",
-        "groups": [],
-        "members": []
+      "cloud": {
+        "apiKey": "",
+        "baseUrl": "https://openspeech.bytedance.com",
+        "model": "seed-audio-1.0",
+        "format": "mp3",
+        "sampleRate": 24000,
+        "promptPrefix": ""
       }
     },
     "proactive": {
@@ -368,6 +363,24 @@
       "maxBytes": 8388608,
       "maxPixels": 64000000,
       "maxCount": 5
+    },
+    "image": {
+      "enabled": true,
+      "cdpUrl": "http://127.0.0.1:9222",
+      "cropWatermark": true,
+      "cropPx": 0,
+      "promptSuffix": "只生成 1 张图片，不要多张。",
+      "minGapMs": 60000,
+      "maxPerDay": 15
+    },
+    "sessionRotation": {
+      "enabled": true,
+      "maxTurns": 120,
+      "maxAgeHours": 12
+    },
+    "naming": {
+      "group": "",
+      "private": ""
     }
   },
   "webSearch": {
