@@ -67,7 +67,7 @@ async def main() -> int:
     while True:
         st = await get_state(cred, args.bvid)
         print(json.dumps(st, ensure_ascii=False))
-        if st["state"] == 0:
+        if st["state"] in (0, -50):  # 0=开放浏览，-50=仅自己可见（审核已完成）
             if args.public and st["private"]:
                 print(json.dumps(await set_public(cred, args.bvid), ensure_ascii=False))
                 print(json.dumps(await get_state(cred, args.bvid), ensure_ascii=False))

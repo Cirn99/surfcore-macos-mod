@@ -2674,6 +2674,21 @@ if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output 
       json(res, 200, { ok: true, ...explainText(String(body.text ?? '')) });
       return;
     }
+    if (pathname.startsWith(`${API_PREFIX}/socialV2/video`)) {
+      const suffix = pathname.slice((API_PREFIX + '/socialV2/video').length) || '/';
+      const method = req.method || 'GET';
+      let body;
+      if (method === 'POST') {
+        try { body = JSON.parse((await readBody(req)) || '{}'); } catch { body = {}; }
+      }
+      try {
+        const data = await callBridge('/api/socialV2/video' + suffix + (url.search || ''), { method, body, timeoutMs: 900000 });
+        json(res, 200, data);
+      } catch (error) {
+        json(res, 502, { ok: false, error: error?.message ?? String(error) });
+      }
+      return;
+    }
     if (pathname === `${API_PREFIX}/socialV2/mods-status`) {
       try {
         const data = await callBridge('/api/socialV2/mods-status', { timeoutMs: 15000 });

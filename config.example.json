@@ -381,6 +381,13 @@
     "naming": {
       "group": "",
       "private": ""
+    },
+    "video": {
+      "python": "python3",
+      "biliPython": "~/.local/bili-cli-venv/bin/python",
+      "biliBin": "~/.local/bili-cli-venv/bin/bili",
+      "ffmpeg": "",
+      "autoPublish": true
     }
   },
   "webSearch": {

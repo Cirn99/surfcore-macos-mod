@@ -5,6 +5,22 @@
 
 上游更新日志见 [CHANGELOG.upstream.md](CHANGELOG.upstream.md)。
 
+## [0.6.22-mod.4] - 2026-10-30
+
+### 新功能：插件里的「视频」栏目
+
+- 新增一级标签「视频」，三块：生成 / 投稿 / 稿件状态
+- **生成**：脚本 DSL（# 标题、- 要点、@ 来源、> 旁白）→ TTS + 幻灯片 + ffmpeg 合成 mp4
+- **投稿**：调用 bili-cli 上传，支持标题/简介/标签/封面/仅自己可见/审核通过自动公开
+- **稿件**：按 BV 号查状态、一键设为公开
+
+### 后端
+
+- 桥接新增 `/api/socialV2/video/{generate,job,jobs,upload,status,publish,list}` 接口
+- 新增 `plugins/surfcore/tools/make-video.py`：BreezeBlue TTS + Pillow 幻灯片 + ffmpeg 合成
+- 插件代理 `socialV2/video/*` 到桥接
+- `bili-autopublish.py` 修正：私密稿件审核完成后状态是 `-50`，现在也能自动公开
+
 ## [0.6.22-mod.3] - 2026-10-30
 
 ### 发布自动化

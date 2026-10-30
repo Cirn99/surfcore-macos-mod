@@ -1954,6 +1954,160 @@ F("toolsPath", "bili.mjs 路径", "留空 = 用合体插件自带的 tools/", "t
         h(FieldGroups, { groups: buildModsGroups(), cfg, set, readOnly: () => false }));
     }
 
+    // ── 视频（生成 / 投稿 / 稿件）───────────────────────────────────────────
+    function parseVideoScript(text) {
+      const blocks = String(text || '').split(/\n\s*\n/).map((x) => x.trim()).filter(Boolean);
+      return blocks.map((block) => {
+        const seg = { title: '', bullets: [], source: '', narration: '' };
+        for (const raw of block.split('\n')) {
+          const line = raw.trim();
+          if (!line) continue;
+          if (line.startsWith('#')) seg.title = line.replace(/^#+\s*/, '');
+          else if (line.startsWith('-')) seg.bullets.push(line.replace(/^-\s*/, ''));
+          else if (line.startsWith('@')) seg.source = line.replace(/^@\s*/, '');
+          else if (line.startsWith('>')) seg.narration += (seg.narration ? ' ' : '') + line.replace(/^>\s*/, '');
+          else if (!seg.title) seg.title = line;
+          else seg.narration += (seg.narration ? ' ' : '') + line;
+        }
+        return seg;
+      }).filter((seg) => seg.narration);
+    }
+
+    function VideoTab({ toast }) {
+      const [title, setTitle] = useState('我是鲸鱼娘，我把自己魔改成了这样');
+      const [subtitle, setSubtitle] = useState('SurfCore macOS 魔改版');
+      const [cover, setCover] = useState('');
+      const [script, setScript] = useState([
+        '# 开场',
+        '> 嗨，我是大肥鱼，住在 QQ 群里的 DeepSeek 鲸鱼娘。',
+        '',
+        '# 语音',
+        '- BreezeBlue 音色 + 火山兜底',
+        '@ 来源：BreezeBlue、火山引擎',
+        '> 语音接的是 BreezeBlue 的云端音色，失败会回退到火山。',
+      ].join('\n'));
+      const [job, setJob] = useState(null);
+      const [genBusy, setGenBusy] = useState(false);
+      const [upFile, setUpFile] = useState('');
+      const [upTitle, setUpTitle] = useState('');
+      const [upDesc, setUpDesc] = useState('');
+      const [upTags, setUpTags] = useState('AI,QQ机器人,DeepSeek,开源');
+      const [upCover, setUpCover] = useState('');
+      const [upPrivate, setUpPrivate] = useState(true);
+      const [upAuto, setUpAuto] = useState(true);
+      const [upBusy, setUpBusy] = useState(false);
+      const [upResult, setUpResult] = useState(null);
+      const [bvid, setBvid] = useState('');
+      const [status, setStatus] = useState(null);
+      const [pubResult, setPubResult] = useState(null);
+
+      const pollJob = async (id) => {
+        try {
+          const r = await api('/socialV2/video/job?id=' + encodeURIComponent(id));
+          if (r?.job) {
+            setJob(r.job);
+            if (r.job.status === 'running') setTimeout(() => pollJob(id), 2500);
+            else if (r.job.status === 'done') { setGenBusy(false); toast?.('✓ 视频生成完成'); }
+            else { setGenBusy(false); toast?.('✗ 生成失败：' + (r.job.error || '未知错误')); }
+          }
+        } catch (e) { setGenBusy(false); toast?.('✗ 查询任务失败：' + e.message); }
+      };
+
+      const generate = async () => {
+        const segments = parseVideoScript(script);
+        if (!segments.length) { toast?.('脚本为空：每段用「> 旁白」写一句话'); return; }
+        setGenBusy(true); setJob(null);
+        try {
+          const r = await api('/socialV2/video/generate', { method: 'POST', body: { title, subtitle, cover, segments } });
+          if (!r?.ok) throw new Error(r?.error || '提交失败');
+          setJob({ id: r.id, status: 'running', progress: 0, log: [], out: r.out });
+          pollJob(r.id);
+        } catch (e) { setGenBusy(false); toast?.('✗ ' + e.message); }
+      };
+
+      const upload = async () => {
+        setUpBusy(true); setUpResult(null);
+        try {
+          const r = await api('/socialV2/video/upload', { method: 'POST', body: {
+            file: upFile, title: upTitle, desc: upDesc, tags: upTags.split(/[,，\s]+/).filter(Boolean),
+            cover: upCover, private: upPrivate, autoPublic: upAuto,
+          } });
+          if (!r?.ok) throw new Error(r?.error || '上传失败');
+          setUpResult(r);
+          if (r.bvid) setBvid(r.bvid);
+          toast?.(r.bvid ? '✓ 已投稿：' + r.bvid : '✓ 已提交');
+        } catch (e) { toast?.('✗ ' + e.message); }
+        finally { setUpBusy(false); }
+      };
+
+      const checkStatus = async () => {
+        try {
+          const r = await api('/socialV2/video/status?bvid=' + encodeURIComponent(bvid.trim()));
+          if (!r?.ok) throw new Error(r?.error || '查询失败');
+          setStatus(r.data ?? r);
+        } catch (e) { toast?.('✗ ' + e.message); }
+      };
+
+      const publish = async () => {
+        try {
+          const r = await api('/socialV2/video/publish', { method: 'POST', body: { bvid: bvid.trim() } });
+          setPubResult(r);
+          toast?.(r.ok ? '✓ 已请求公开' : '✗ 公开失败');
+          checkStatus();
+        } catch (e) { toast?.('✗ ' + e.message); }
+      };
+
+
+
+      return h('div', null,
+        h('div', { className: 'qbw-card' },
+          h('h4', null, '生成图文视频'),
+          h('p', { className: 'qbw-hint' }, '每段空行分隔；# 标题、- 要点、@ 来源、> 旁白（旁白必填）。'),
+          h('div', { className: 'qbw-row' }, h('span', { className: 'qbw-label' }, '标题'),
+            h('input', { className: 'qbw-input', value: title, onChange: (e) => setTitle(e.target.value) })),
+          h('div', { className: 'qbw-row' }, h('span', { className: 'qbw-label' }, '副标题'),
+            h('input', { className: 'qbw-input', value: subtitle, onChange: (e) => setSubtitle(e.target.value) })),
+          h('div', { className: 'qbw-row' }, h('span', { className: 'qbw-label' }, '封面图（可选）'),
+            h('input', { className: 'qbw-input', value: cover, placeholder: '/path/cover.png', onChange: (e) => setCover(e.target.value) })),
+          h('textarea', { className: 'qbw-input', style: { width: '100%', minHeight: '220px', marginTop: '8px', fontFamily: 'monospace' },
+            value: script, onChange: (e) => setScript(e.target.value) }),
+          h('div', { className: 'qbw-actions' },
+            h(Btn, { onClick: generate, disabled: genBusy }, genBusy ? '生成中…' : '开始生成')),
+          job ? h('div', { className: 'qbw-hint', style: { marginTop: '8px' } },
+            '状态：' + job.status + ' · ' + (job.progress ?? 0) + '%' + (job.out ? ' · ' + job.out : ''),
+            (job.log && job.log.length) ? h('div', null, job.log.slice(-3).join(' / ')) : null) : null),
+
+        h('div', { className: 'qbw-card' },
+          h('h4', null, '投稿到 B站'),
+          h('div', { className: 'qbw-row' }, h('span', { className: 'qbw-label' }, '视频文件'),
+            h('input', { className: 'qbw-input', value: upFile, placeholder: '/path/out.mp4', onChange: (e) => setUpFile(e.target.value) })),
+          h('div', { className: 'qbw-row' }, h('span', { className: 'qbw-label' }, '封面'),
+            h('input', { className: 'qbw-input', value: upCover, placeholder: '/path/cover.png', onChange: (e) => setUpCover(e.target.value) })),
+          h('div', { className: 'qbw-row' }, h('span', { className: 'qbw-label' }, '标题'),
+            h('input', { className: 'qbw-input', value: upTitle, onChange: (e) => setUpTitle(e.target.value) })),
+          h('div', { className: 'qbw-row' }, h('span', { className: 'qbw-label' }, '标签'),
+            h('input', { className: 'qbw-input', value: upTags, onChange: (e) => setUpTags(e.target.value) })),
+          h('textarea', { className: 'qbw-input', style: { width: '100%', minHeight: '120px', marginTop: '8px' },
+            placeholder: '简介', value: upDesc, onChange: (e) => setUpDesc(e.target.value) }),
+          h('div', { className: 'qbw-row' }, h('span', { className: 'qbw-label' }, '仅自己可见'),
+            h('input', { type: 'checkbox', checked: upPrivate, onChange: (e) => setUpPrivate(e.target.checked) })),
+          h('div', { className: 'qbw-row' }, h('span', { className: 'qbw-label' }, '审核通过自动公开'),
+            h('input', { type: 'checkbox', checked: upAuto, onChange: (e) => setUpAuto(e.target.checked) })),
+          h('div', { className: 'qbw-actions' },
+            h(Btn, { onClick: upload, disabled: upBusy }, upBusy ? '上传中…' : '上传投稿')),
+          upResult ? h('div', { className: 'qbw-hint' }, '已投稿：' + (upResult.bvid || '') + (upResult.url ? ' · ' + upResult.url : '')) : null),
+
+        h('div', { className: 'qbw-card' },
+          h('h4', null, '稿件状态'),
+          h('div', { className: 'qbw-row' }, h('span', { className: 'qbw-label' }, 'BV 号'),
+            h('input', { className: 'qbw-input', value: bvid, placeholder: 'BV1xxxxxxx', onChange: (e) => setBvid(e.target.value) })),
+          h('div', { className: 'qbw-actions' },
+            h(Btn, { kind: 'qbw-btn2', onClick: checkStatus, disabled: !bvid.trim() }, '查询状态'),
+            h(Btn, { onClick: publish, disabled: !bvid.trim() }, '设为公开')),
+          status ? h('div', { className: 'qbw-hint' }, JSON.stringify(status)) : null,
+          pubResult ? h('div', { className: 'qbw-hint' }, JSON.stringify(pubResult)) : null));
+    }
+
     function QQTab({ cfg, set, admin, setAdmin, unified, setUnified, overview, busy, setBusy, toast, reload, goTab }) {
       const [query, setQuery] = useState("");
       const tools = Object.keys(cfg?.socialV2?.tools ?? {});
@@ -4649,6 +4803,7 @@ F("socialV2.voice.ffmpegPath", "ffmpeg 路径", "留空走 PATH", "text", { wide
       ["qq", "QQ"],
       ["mods", "魔改"],
       ["bili", "B站"],
+      ["video", "视频"],
       ["tokens", "Token 额度"],
       ["watch", "观看历史"],
       ["memory", "记忆"],
@@ -4841,6 +4996,7 @@ F("socialV2.voice.ffmpegPath", "ffmpeg 路径", "留空走 PATH", "text", { wide
         if (tab === "purpose") return h(PurposeTab, { qq, setQq: setQqPath, unified, setUnified: setUnifiedPath, overview, busy, setBusy, toast: notify, reload, goTab: setTab });
         if (tab === "mods") return h(ModsTab, { cfg: qq, set: setQqPath });
         if (tab === "qq") return h(QQTab, { cfg: qq, set: setQqPath, admin: unified?.admin ?? {}, setAdmin, unified, setUnified: setUnifiedPath, overview, busy, setBusy, toast: notify, reload, goTab: setTab });
+        if (tab === "video") return h(VideoTab, { toast: notify });
         if (tab === "bili") return h(BiliTab, { cfg: bili, set: setBiliPath, qq: normalizedQq, setQqPath, admin: unified?.admin ?? {}, setAdmin, unified, setUnified: setUnifiedPath, qqPrivate: normalizedQq?.allow?.private ?? [], qqAllowAll: normalizedQq?.allowAllWhenEmpty === true, overview, busy, setBusy, toast: notify, reload });
         if (tab === "tokens") return h(TokenTab, { budget, limits: limitDraft, onChange: setLimitDraft, disabled: !!busy, alertedToday: tokenAlerted, onSave: () => save(false), busy, toast: notify });
         if (tab === "watch") return h(WatchTab, { busy, setBusy, toast: notify, goTab: setTab });

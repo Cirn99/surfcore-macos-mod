@@ -33,27 +33,3 @@
 
 如果改动会破坏已有配置（例如删字段、改默认行为），在 CHANGELOG 里单独用
 `### 破坏性变更` 标出，并在 Release 正文里置顶。
-
-## 历史版本下载
-
-每个 Release 都带两类下载：
-
-1. **源码 zip 附件**：`surfcore-macos-mod-<version>.zip`（由 `scripts/release.sh` 生成）
-2. **GitHub 自动源码包**：Release 页面底部的 `Source code (zip / tar.gz)`
-
-旧版本永久保留在 Releases 列表里，随时可以回退：
-
-```
-https://github.com/Cirn99/surfcore-macos-mod/releases
-```
-
-## 发布脚本
-
-```bash
-# 1. 改 package.json version
-# 2. 写 CHANGELOG.md 条目
-git add -A && git commit -m "release: v0.6.22-mod.N"
-GITHUB_TOKEN=ghp_xxx bash scripts/release.sh
-```
-
-脚本会打包、打 tag、推送、建 Release、上传 zip 附件。

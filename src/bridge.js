@@ -10,7 +10,7 @@ import os from 'node:os';
 import http from 'node:http';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import yaml from 'js-yaml';
 import { extractPresetPrefix, presetPromptBlockers, presetPromptWarnings, renderPresetPromptYaml } from './preset-prompt.js';
 import { GEN1_ROLE_LINE_RE, parseRoleSections, roleCharStats, roleSectionReport, selectRoleText } from './role-card.js';
@@ -2783,6 +2783,42 @@ async function main() {
       ws.send(JSON.stringify({ id: mid, method, params }));
     });
     return { page, call, close: () => { try { ws.close(); } catch {} } };
+  }
+
+  // ── B站视频：外部命令与任务表 ───────────────────────────────────────────
+  const videoJobs = new Map();
+
+  function surfcoreRootPath() {
+    return path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+  }
+  const surfcoreRoot = surfcoreRootPath();
+
+  function videoPython() {
+    return String(cfg.socialV2?.video?.python || process.env.SURFCORE_PYTHON || 'python3');
+  }
+  function videoFfmpeg() {
+    const custom = String(cfg.socialV2?.video?.ffmpeg || '');
+    if (custom) return custom;
+    const local = path.join(surfcoreRoot, 'plugins', 'surfcore', 'tools', 'bin', 'ffmpeg');
+    return fs.existsSync(local) ? local : 'ffmpeg';
+  }
+  function videoBiliPython() {
+    return String(cfg.socialV2?.video?.biliPython || path.join(os.homedir(), '.local', 'bili-cli-venv', 'bin', 'python'));
+  }
+  function videoBili() {
+    return String(cfg.socialV2?.video?.biliBin || path.join(os.homedir(), '.local', 'bili-cli-venv', 'bin', 'bili'));
+  }
+  function runCmd(cmd, args, { timeoutMs = 600000, cwd } = {}) {
+    return new Promise((resolve) => {
+      let out = '', err = '';
+      let child;
+      try { child = spawn(cmd, args, { cwd }); } catch (error) { resolve({ code: -1, stdout: '', stderr: String(error) }); return; }
+      const timer = setTimeout(() => { try { child.kill('SIGKILL'); } catch {} }, timeoutMs);
+      child.stdout.on('data', (d) => { out += String(d); });
+      child.stderr.on('data', (d) => { err += String(d); });
+      child.on('error', (e) => { clearTimeout(timer); resolve({ code: -1, stdout: out, stderr: String(e) }); });
+      child.on('close', (code) => { clearTimeout(timer); resolve({ code, stdout: out, stderr: err }); });
+    });
   }
 
   async function doubaoDraw(prompt, opts = {}) {
@@ -7558,6 +7594,131 @@ async function main() {
             // 额度只在真正发出后才记账（voiceBudgetCommit），所以失败路径无需回滚。
             sendJson({ ok: false, error: error?.message ?? String(error) }, 500);
           }
+          return;
+        }
+
+        // ── B站视频流水线 ────────────────────────────────────────────────
+        if (url.pathname === '/api/socialV2/video/job' && req.method === 'GET') {
+          const id = String(url.searchParams.get('id') || '');
+          const job = videoJobs.get(id);
+          if (!job) { sendJson({ ok: false, error: '任务不存在' }, 404); return; }
+          sendJson({ ok: true, job });
+          return;
+        }
+
+        if (url.pathname === '/api/socialV2/video/jobs' && req.method === 'GET') {
+          const list = [...videoJobs.values()].slice(-20).reverse();
+          sendJson({ ok: true, jobs: list });
+          return;
+        }
+
+        if (url.pathname === '/api/socialV2/video/generate' && req.method === 'POST') {
+          const body = await readBody();
+          const title = String(body.title || '').trim();
+          const segments = Array.isArray(body.segments) ? body.segments : [];
+          if (!title) { sendJson({ ok: false, error: '标题不能为空' }, 400); return; }
+          if (!segments.length) { sendJson({ ok: false, error: '至少一段旁白' }, 400); return; }
+          const id = 'v' + Date.now().toString(36) + crypto.randomBytes(2).toString('hex');
+          const dir = path.join(STATE_DIR, "video", id);
+          fs.mkdirSync(dir, { recursive: true });
+          const voice = cfg.socialV2?.voice?.breeze ?? {};
+          const spec = {
+            title,
+            subtitle: String(body.subtitle || 'SurfCore macOS 魔改版'),
+            cover: String(body.cover || ''),
+            ffmpeg: videoFfmpeg(),
+            voice: {
+              apiKey: String(voice.apiKey || ''),
+              baseUrl: String(voice.baseUrl || 'https://api.breeze.blue'),
+              voiceId: String(voice.voiceId || ''),
+            },
+            segments: segments.map((seg) => ({
+              title: String(seg.title || ''),
+              bullets: Array.isArray(seg.bullets) ? seg.bullets.map(String) : [],
+              source: String(seg.source || ''),
+              narration: String(seg.narration || ''),
+              image: String(seg.image || ''),
+              kind: seg.kind === 'credits' ? 'credits' : undefined,
+            })),
+          };
+          const specPath = path.join(dir, 'spec.json');
+          fs.writeFileSync(specPath, JSON.stringify(spec, null, 2));
+          const out = path.join(dir, 'out.mp4');
+          const job = { id, title, status: 'running', progress: 0, log: [], out, createdAt: Date.now(), error: null };
+          videoJobs.set(id, job);
+          const py = videoPython();
+          const tool = path.join(surfcoreRoot, 'plugins', 'surfcore', 'tools', 'make-video.py');
+          const child = spawn(py, [tool, '--spec', specPath, '--out', out], { cwd: dir });
+          const pushLog = (line) => {
+            const t = String(line).trim();
+            if (!t) return;
+            if (t.startsWith('PROGRESS ')) {
+              const m = t.match(/PROGRESS (\d+)\/(\d+)/);
+              if (m) job.progress = Math.round((Number(m[1]) / Number(m[2])) * 100);
+              return;
+            }
+            job.log.push(t.slice(0, 300));
+            if (job.log.length > 40) job.log.shift();
+          };
+          child.stdout.on('data', (d) => String(d).split('\n').forEach(pushLog));
+          child.stderr.on('data', (d) => String(d).split('\n').forEach(pushLog));
+          child.on('error', (error) => { job.status = 'failed'; job.error = String(error?.message || error); });
+          child.on('close', (code) => {
+            if (code === 0 && fs.existsSync(out)) { job.status = 'done'; job.progress = 100; }
+            else if (job.status !== 'failed') { job.status = 'failed'; job.error = job.log.slice(-3).join(' | ') || ('退出码 ' + code); }
+          });
+          sendJson({ ok: true, id, out });
+          return;
+        }
+
+        if (url.pathname === '/api/socialV2/video/upload' && req.method === 'POST') {
+          const body = await readBody();
+          const file = String(body.file || '').trim();
+          const title = String(body.title || '').trim();
+          if (!file || !fs.existsSync(file)) { sendJson({ ok: false, error: '视频文件不存在：' + file }, 400); return; }
+          if (!title) { sendJson({ ok: false, error: '标题不能为空' }, 400); return; }
+          const tags = (Array.isArray(body.tags) ? body.tags : String(body.tags || '').split(/[,，\s]+/)).map((t) => String(t).trim()).filter(Boolean).slice(0, 10);
+          const args = ['upload', 'video', file, '--title', title, '--tag', ...(tags.length ? tags.flatMap((t) => ['--tag', t]) : []), '--desc', String(body.desc || '')];
+          if (body.cover && fs.existsSync(String(body.cover))) args.push('--cover', String(body.cover));
+          const priv = body.private !== false;
+          if (priv) args.push('--private');
+          const r = await runCmd(videoBili(), args, { timeoutMs: 900000 });
+          const text = r.stdout.trim();
+          let parsed = null;
+          try { parsed = JSON.parse(text.split('\n').filter(Boolean).pop()); } catch {}
+          if (!parsed || parsed.ok === false) { sendJson({ ok: false, error: (parsed?.error?.message) || text.slice(-300) || r.stderr.slice(-300), raw: text.slice(-800) }, 502); return; }
+          const bvid = parsed.data?.bvid || null;
+          if (bvid && body.autoPublic !== false) {
+            runCmd(videoBiliPython(), [path.join(surfcoreRoot, 'scripts', 'bili-autopublish.py'), '--bvid', bvid, '--wait', '7200', '--public'], { timeoutMs: 7300000 }).catch(() => {});
+          }
+          sendJson({ ok: true, bvid, url: parsed.data?.url ?? null, title: parsed.data?.title ?? title });
+          return;
+        }
+
+        if (url.pathname === '/api/socialV2/video/status' && req.method === 'GET') {
+          const bvid = String(url.searchParams.get('bvid') || '').trim();
+          if (!bvid) { sendJson({ ok: false, error: 'bvid 不能为空' }, 400); return; }
+          const r = await runCmd(videoBili(), ['upload', 'status', bvid], { timeoutMs: 60000 });
+          let parsed = null;
+          try { parsed = JSON.parse(r.stdout.trim().split('\n').filter(Boolean).pop()); } catch {}
+          sendJson(parsed ? { ok: true, data: parsed.data ?? parsed } : { ok: false, error: r.stderr.slice(-300) || r.stdout.slice(-300) }, parsed ? 200 : 502);
+          return;
+        }
+
+        if (url.pathname === '/api/socialV2/video/publish' && req.method === 'POST') {
+          const body = await readBody();
+          const bvid = String(body.bvid || '').trim();
+          if (!bvid) { sendJson({ ok: false, error: 'bvid 不能为空' }, 400); return; }
+          const r = await runCmd(videoBiliPython(), [path.join(surfcoreRoot, 'scripts', 'bili-autopublish.py'), '--bvid', bvid, '--public'], { timeoutMs: 180000 });
+          sendJson({ ok: r.code === 0, stdout: r.stdout.slice(-800), stderr: r.stderr.slice(-400) });
+          return;
+        }
+
+        if (url.pathname === '/api/socialV2/video/list' && req.method === 'GET') {
+          const r = await runCmd(videoBili(), ['upload', 'list'], { timeoutMs: 60000 });
+          let parsed = null;
+          try { parsed = JSON.parse(r.stdout.trim().split('\n').filter(Boolean).pop()); } catch {}
+          sendJson(parsed ? { ok: true, data: parsed.data ?? parsed } : { ok: false, error: r.stderr.slice(-300) || r.stdout.slice(-300) }, parsed ? 200 : 502);
           return;
         }
 
