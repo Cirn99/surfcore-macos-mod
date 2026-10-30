@@ -2674,6 +2674,15 @@ if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output 
       json(res, 200, { ok: true, ...explainText(String(body.text ?? '')) });
       return;
     }
+    if (pathname === `${API_PREFIX}/socialV2/mods-status`) {
+      try {
+        const data = await callBridge('/api/socialV2/mods-status', { timeoutMs: 15000 });
+        json(res, 200, data);
+      } catch (error) {
+        json(res, 502, { ok: false, error: error?.message ?? String(error) });
+      }
+      return;
+    }
     json(res, 404, { ok: false, error: `未知接口：${pathname}` });
   });
 
