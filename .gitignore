@@ -7,4 +7,4 @@ config.json.bak-*
 assets/
 plugins/surfcore/tools/bin/
 .DS_Store
-dist/
+dist/*.zip
