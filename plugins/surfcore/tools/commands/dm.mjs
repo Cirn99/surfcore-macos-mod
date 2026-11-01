@@ -240,6 +240,11 @@ if (r.code === 0) {
   //   改为保留已有字段，只更新主人通道自己的计数 ✓
   saveQ({ ...q, date: today(), count: used + 1, mid: ONLY_TO, at: new Date().toISOString() })
   if (SHARE) record({ type: 'dm', target: SHARE_TARGET, note: MSG.slice(0, 40), auto: true, share: true })
+  // 私信足迹（只读后台用）：不参与额度，单独一条 jsonl，发失败不会走到这里。
+  try {
+    fs.appendFileSync(path.join(biliStateDir(), 'dm-history.jsonl'),
+      JSON.stringify({ at: new Date().toISOString(), mid: ONLY_TO, name: OWNER_NAME, text: MSG.slice(0, 300), share: SHARE }) + '\n')
+  } catch { /* 记账失败不影响已发出的私信 */ }
   console.log(`  ✓ 已发送（HTTP ${r.http}）${SHARE ? ' · 已记入分享额度 ✓' : ' · 推送不占额度 ✓'}`)
   process.exit(0)
 }
