@@ -87,7 +87,9 @@
 
   .empty { color: var(--dim); text-align: center; padding: 40px 0; font-size: 13px; }
   .err { color: #ff7b72; background: rgba(255,123,114,.08); border: 1px solid rgba(255,123,114,.25);
-         border-radius: 10px; padding: 10px 12px; margin-top: 16px; font-size: 12.5px; }
+         border-radius: 10px; padding: 10px 12px; margin-top: 16px; font-size: 12.5px; line-height: 1.9; }
+  .err code { background: #0b0d12; border: 1px solid var(--line); border-radius: 5px;
+              padding: 1px 6px; color: #cfd6e6; font-size: 12px; }
   footer { margin-top: 40px; color: #5c6478; font-size: 11.5px; text-align: center; }
 </style>
 </head>
@@ -226,7 +228,14 @@ async function load() {
     DATA = json;
     render();
   } catch (e) {
-    $('list').innerHTML = `<div class="err">读取失败：${esc(e.message)}</div>`;
+    const down = /failed to fetch|load failed|networkerror|network error/i.test(String(e.message || ''));
+    $('list').innerHTML = down
+      ? `<div class="err"><b>连不上后台服务</b>（${esc(e.message)}）<br>
+          大概是被 DSH 重启带走了。重新起一下：<br>
+          <code>node ~/SurfCore/scripts/bili-footprint/start.mjs</code><br>
+          起来之后这个页面 30 秒内会自己恢复，不用刷新。</div>`
+      : `<div class="err">读取失败：${esc(e.message)}</div>`;
+    $('sub').textContent = '后台未连接';
   }
 }
 

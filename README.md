@@ -111,8 +111,13 @@
 ### 10. B站活动足迹（本地只读后台）
 
 ```bash
-node scripts/bili-footprint/server.mjs --open    # → http://127.0.0.1:7801
+node scripts/bili-footprint/start.mjs --open    # 后台启动 → http://127.0.0.1:7801
+node scripts/bili-footprint/stop.mjs            # 停止
 ```
+
+> ⚠️ 别用 `nohup node ... &` 起：它挂在当时的进程组里，DSH 一重启（GUI 端口会变）
+> 整棵子树就被收走，页面变成浏览器的「Load failed」。
+> `start.mjs` 用 `spawn({detached:true})` 起，ppid 变 1，DSH 重启、终端关闭都不影响。
 
 聚合她自己的记账，按天分组的时间线：
 
