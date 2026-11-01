@@ -18,6 +18,7 @@ import { fileURLToPath } from 'node:url';
 import { SnowLumaWebSocketClient, text } from '@snowluma/sdk';
 import { NodeApiClient, unwrap, createTurnCollector, discoverDshLaunchToken } from './dsh-client.js';
 import { mdToPlain, splitForQQ, truncateText, truncateTextTail } from './md-to-plain.js';
+import { checkProfileMcp, presetMismatch } from './dsh-health.js';
 import { SENSITIVE_RE } from './sensitive.js';
 import { looksLikeUnfinished } from './v2-wait.js';
 import { compactModelMessage } from './qq-model-view.js';
@@ -4199,6 +4200,54 @@ async function main() {
   }
 
   /** 当前模式下的会话预设；返回 undefined 表示「该模式下没有可安全使用的 preset」 */
+  /**
+   * DSH 升级后的健康审计（摘自上流 v0.8.5）。
+   *   ① profile 的 3 条 MCP 被摘 → 新会话也没有 qq_*（提示重跑 setup-dsh.mjs + 重启 DSH）；
+   *   ② 旧会话的 preset 与当前配置不一致 → 工具表在创建时定死，必须重建。
+   * 只审计「有记录 preset 且与期望不同」的会话，避免误删老会话。
+   */
+  async function auditDshHealth(reason = 'dsh-ready') {
+    try {
+      const home = process.env.USERPROFILE || os.homedir();
+      const check = checkProfileMcp(home);
+      if (check.checked > 0 && !check.ok) {
+        const broken = check.broken[0];
+        const msg = `DSH profile ${broken?.profile ?? '?'} 缺 MCP：${(broken?.missing ?? []).join(', ')}`
+          + ' —— 新会话拿不到 qq_* 工具（收得到消息但发不出去）。'
+          + ' 请在宿主机终端跑 node scripts/setup-dsh.mjs <profile>，然后**完全退出并重开 DSH**；'
+          + '旧会话可能还要在控制台重置一次。';
+        log(`⚠️ [dsh-health] ${msg}`);
+        appendActivity(`[dsh-health] ${msg}`);
+      } else if (check.checked > 0) {
+        log(`[dsh-health] profile 正常：${check.healthy.join('、')}`);
+      }
+    } catch (error) {
+      log(`[dsh-health] profile 检查失败（继续）：${error?.message ?? error}`);
+    }
+    try {
+      const list = unwrap(await withTimeout(api.sessions.list({}), DSH_CONTROL_TIMEOUT_MS, 'sessions.list'), 'session.list');
+      const byId = new Map((list.items ?? []).map((item) => [item.sessionId, item]));
+      let rebuilt = 0;
+      const details = [];
+      for (const [key, sid] of Object.entries(state.sessions ?? {})) {
+        const item = byId.get(sid);
+        if (!item) continue;
+        const expected = modePreset(key, currentMode, cfg);
+        if (!presetMismatch(expected, item.agentPreset)) continue;
+        details.push(`${key}(${item.agentPreset}→${expected})`);
+        retireSession(key);
+        rebuilt += 1;
+      }
+      if (rebuilt > 0) {
+        const msg = `[dsh-health] 已重建 ${rebuilt} 个 preset 不一致的会话：${details.join(', ')}`;
+        log(msg);
+        appendActivity(msg);
+      }
+    } catch (error) {
+      log(`[dsh-health] 会话 preset 审计失败（继续）：${error?.message ?? error}`);
+    }
+  }
+
   function modePreset(key, mode, cfg) {
     if (mode === 'closed-agent') {
       const chosen = resolvePresetName(closedAgentPreset);
@@ -4407,6 +4456,7 @@ async function main() {
         dshReady = true;
         lastMode = currentMode;
         log(`DSH 已就绪（模式: ${currentMode}）`);
+        void auditDshHealth('dsh-ready');
         // 每天定时早安（DSH 在线才排定；桥接重启会重新排）
         try { scheduleMorningGreeting(); } catch (error) { log(`[早安] 排定失败：${error?.message ?? error}`); }
         // 在线时每群每小时最多主动 @ 一次

@@ -128,6 +128,17 @@ node scripts/bili-footprint/stop.mjs            # 停止
 
 特点：只读、不写任何文件、不碰账号；独立进程，改完刷新即可，不用重启 DSH。标题缺失时后台会去 B站 补一次并缓存。
 
+### 11. DSH 升级健康检查（摘自上流 v0.8.5）
+
+上游 v0.8.5 修的是「DSH 升级后 QQ 会话没有 `qq_*` 工具，只能收不能发」。这个分支摘了它的思路，做了两处适配：
+
+- 新增 `src/dsh-health.js`：扫 `~/.dsh/profiles/*/cordis.patch.yml`，检查三条 MCP（`mcp-snowluma` / `mcp-snowluma-host` / `mcp-web-search-safe`）还在不在
+- 桥接就绪时审计一次：缺 MCP → 日志 + 活动流里给出**可在宿主机执行的**修复命令；会话 preset 与当前配置不一致 → 自动退役重建
+
+与上游的差异：只审计**挂了 surfcore 的 profile**（看 `package.json` 的 `dsh.profile.bundles`）。
+这台机器还有 `headless`（pixiv 值班用，本来就不该有这三条 MCP），按上游口径会把它算进 broken，
+真出问题时提示会指向错误的 profile。
+
 ## 安装
 
 安装流程与上游一致（`npm install` → `setup-dsh.mjs` → 重启 DSH → 诊断一键安装），差异和踩坑记在 [MODS.md](MODS.md)：
