@@ -5,43 +5,6 @@
 
 上游更新日志见 [CHANGELOG.upstream.md](CHANGELOG.upstream.md)。
 
-## [0.6.22-mod.4] - 2026-10-30
-
-### 新功能：插件里的「视频」栏目
-
-- 新增一级标签「视频」，三块：生成 / 投稿 / 稿件状态
-- **生成**：脚本 DSL（# 标题、- 要点、@ 来源、> 旁白）→ TTS + 幻灯片 + ffmpeg 合成 mp4
-- **投稿**：调用 bili-cli 上传，支持标题/简介/标签/封面/仅自己可见/审核通过自动公开
-- **稿件**：按 BV 号查状态、一键设为公开
-
-### 后端
-
-- 桥接新增 `/api/socialV2/video/{generate,job,jobs,upload,status,publish,list}` 接口
-- 新增 `plugins/surfcore/tools/make-video.py`：BreezeBlue TTS + Pillow 幻灯片 + ffmpeg 合成
-- 插件代理 `socialV2/video/*` 到桥接
-- `bili-autopublish.py` 修正：私密稿件审核完成后状态是 `-50`，现在也能自动公开
-
-## [0.6.22-mod.3] - 2026-10-30
-
-### 发布自动化
-
-- 新增 `scripts/bili-autopublish.py`：投稿后轮询审核状态，通过后自动把「仅自己可见」改成公开
-- 复用 bili-cli 的 archive 读取与 edit 载荷构造，只补 `is_only_self=0`
-- 用法：`python3 scripts/bili-autopublish.py --bvid BVxxx --wait 21600 --public`
-
-## [0.6.22-mod.2] - 2026-10-30
-
-### 发布与版本
-
-- 新增 `scripts/release.sh`：一条命令完成打包、打 tag、推 main、建 Release、上传源码 zip
-- 每个 Release 都附带 `surfcore-macos-mod-<version>.zip`，老版本永久可下载
-- 补发 `v0.6.22-mod.1` 的源码 zip 附件
-- `VERSIONS.md` 补充附件与历史版本说明
-
-### 文档
-
-- README 版本行同步到 mod.2
-
 ## [0.6.22-mod.1] - 2026-10-30
 
 首个公开版本：在 macOS 上跑通 SurfCore，并加入语音、表情包、梗百科、豆包生图等功能。

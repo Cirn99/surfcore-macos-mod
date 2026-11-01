@@ -840,6 +840,14 @@ F("sessionCwd", "会话工作目录", "留空用 surfcore 根目录", "text", { 
         F("fishGuard.bypassDirectAddress", "被直接叫到时放行", "默认开；只回一句，不主动展开", "switch"),
         F("fishGuard.blockSends", "保护期内硬拦发送", "默认开；防止 AI 趁冷却偷偷发", "switch"),
       ]},
+      { group: "NIKKE 联盟突袭（出刀表）", note: "群里发口令直接出图：桥接本地执行，不经过模型、不花 token", fields: [
+        F("nikke.enabled", "启用", "关掉后口令不再响应", "switch"),
+        F("nikke.groups", "生效群号", "逗号分隔；只在这些群响应", "list"),
+        F("nikke.keywords", "触发口令", "精确匹配（@ 和尾部标点会自动去掉）", "list"),
+        F("nikke.groupCooldownSec", "群冷却（秒）", "同一个群两次查询的最小间隔", "number", { min: 0, step: 1 }),
+        F("nikke.userCooldownSec", "个人冷却（秒）", "同一个人两次查询的最小间隔", "number", { min: 0, step: 1 }),
+        F("nikke.noticeCooldownSec", "冷却提示间隔（秒）", "被挡时最多多久回一句提示", "number", { min: 0, step: 1 }),
+      ]},
       { group: "Token 防爆破", note: "和鱼群守则同时生效：鱼群守则先拦，再按这里限制唤醒次数/单次发送条数；每日花费/额度已迁移到「Token 额度」页（按自然日，QQ/B站/总额分开管）", fields: [
         F("socialV2.tokenGuard.enabled", "启用 Token 防爆破", "默认开；关掉 = 只按旧限频", "switch"),
         F("socialV2.tokenGuard.maxWakesPerDay", "单会话每天最多醒", "默认 20；群聊；超过后不再唤醒", "number", { min: 0, max: 200 }),
@@ -1246,18 +1254,20 @@ F("toolsPath", "bili.mjs 路径", "留空 = 用合体插件自带的 tools/", "t
       const scheduler = overview?.scheduler ?? {};
       const snow = overview?.snowluma ?? {};
       const [mods, setMods] = useState(null);
+      const [modsErr, setModsErr] = useState('');
+      const [modsTick, setModsTick] = useState(0);
       useEffect(() => {
         let alive = true;
         const loadMods = async () => {
           try {
             const r = await api("/socialV2/mods-status");
-            if (alive) setMods(r);
-          } catch {}
+            if (alive) { setMods(r); setModsErr(''); }
+          } catch (e) { if (alive) setModsErr(e?.message ?? String(e)); }
         };
         loadMods();
         const timer = setInterval(loadMods, 15000);
         return () => { alive = false; clearInterval(timer); };
-      }, []);
+      }, [modsTick]);
       const platformStart = overview?.platformStart ?? {};
       const qqStart = platformStart.qq !== false;
       const biliStart = platformStart.bili !== false;
@@ -1342,7 +1352,8 @@ F("toolsPath", "bili.mjs 路径", "留空 = 用合体插件自带的 tools/", "t
             h("div", { className: "qbw-actions" },
               h(Btn, { kind: "qbw-btn2", onClick: () => act("refresh-bili"), disabled: !!busy }, "刷新 B站记忆"))),
           h("div", { className: "qbw-card" },
-            h("h4", null, "魔改状态"),
+            h("h4", null, "魔改状态", h(Btn, { kind: "qbw-btn2", style: { marginLeft: "8px" }, onClick: () => setModsTick((v) => v + 1) }, "刷新")),
+            modsErr ? h("div", { className: "qbw-hint", style: { color: "#e06c6c" } }, "读取失败：" + modsErr) : null,
             !mods ? h("div", { className: "qbw-hint" }, "读取中…") : h("div", null,
               h("div", { className: "qbw-kv" }, h("span", null, "语音"), h("span", null,
                 mods.voice?.lastAt ? `上次 ${Math.max(0, Math.round((Date.now() - mods.voice.lastAt) / 60000))} 分钟前 · CD ${Math.round((mods.voice.gapMs || 180000) / 60000)} 分钟` : `还没发过 · CD ${Math.round((mods.voice?.gapMs || 180000) / 60000)} 分钟`)),
@@ -2108,6 +2119,42 @@ F("toolsPath", "bili.mjs 路径", "留空 = 用合体插件自带的 tools/", "t
           pubResult ? h('div', { className: 'qbw-hint' }, JSON.stringify(pubResult)) : null));
     }
 
+    // ── NIKKE 出刀表：状态卡片（嵌在设置页对应分组里）─────────────────────────
+    function NikkeStatusCard({ toast }) {
+      const [st, setSt] = useState(null);
+      const [busy, setBusy] = useState("");
+      const [msg, setMsg] = useState("");
+      const load = useCallback(async () => {
+        try { setSt(await api("/nikke/status")); }
+        catch (e) { setSt({ ok: false, error: e.message }); }
+      }, []);
+      useEffect(() => { load(); }, [load]);
+      const run = async () => {
+        setBusy("run"); setMsg("");
+        try {
+          const r = await api("/nikke/run", { method: "POST", body: {} });
+          setMsg(r.ok ? `✓ ${r.summary}（${((r.ms ?? 0) / 1000).toFixed(1)}s，只在本机出图，没发群）` : `✗ ${r.error ?? "失败"}`);
+          await load();
+        } catch (e) { setMsg(`✗ ${e.message}`); }
+        finally { setBusy(""); }
+      };
+      const login = st?.login;
+      const last = st?.lastRun;
+      const when = (v) => String(v ?? "").replace("T", " ").slice(0, 16);
+      return h("div", { className: "qbw-card", style: { marginTop: "6px" } },
+        h("div", { style: { display: "flex", alignItems: "center", gap: "8px" } },
+          h("h4", { style: { margin: 0 } }, "状态"),
+          h(Btn, { kind: "qbw-btn2", onClick: load, disabled: !!busy }, "刷新"),
+          h(Btn, { onClick: run, disabled: !!busy }, busy === "run" ? "生成中…" : "试跑一次")),
+        h("div", { className: "qbw-kv" }, h("span", null, "登录态"), h("span", null,
+          login ? `已保存 ${when(login.savedAt)} · 公会 ${login.guildId} · 区服 ${login.areaId}` : "未登录（跑一次 login.cjs）")),
+        h("div", { className: "qbw-kv" }, h("span", null, "上次结果"), h("span", null,
+          last ? `${when(last.at)} · ${last.ok ? last.summary : `失败：${last.error}`}` : "还没跑过")),
+        st && st.ok === false ? h("div", { className: "qbw-err" }, String(st.error ?? "读取失败")) : null,
+        msg ? h("div", { className: msg.startsWith("✓") ? "qbw-ok" : "qbw-err" }, msg) : null,
+        h("div", { className: "qbw-hint" }, "「试跑一次」只在本机出图、不发群；要在群里出表直接发口令。"));
+    }
+
     function QQTab({ cfg, set, admin, setAdmin, unified, setUnified, overview, busy, setBusy, toast, reload, goTab }) {
       const [query, setQuery] = useState("");
       const tools = Object.keys(cfg?.socialV2?.tools ?? {});
@@ -2234,7 +2281,7 @@ F("socialV2.voice.ffmpegPath", "ffmpeg 路径", "留空走 PATH", "text", { wide
               h("select", { className: "qbw-select", value: overview?.mode?.effective ?? "reserved2", onChange: async (e) => {
                 try { await api("/mode", { method: "POST", body: { mode: e.target.value } }); toast(`✓ 模式已切到 ${e.target.value}`); await reload(); } catch (err) { toast(`✗ ${err.message}`); }
               } },
-                [["chat", "chat（一代普通）"], ["reserved", "reserved（一代仿真）"], ["reserved2", "reserved2（二代仿真）"], ["closed-agent", "closed-agent（封闭）"], ["simulation", "simulation（=reserved2）"]].map(([v, l]) => h("option", { key: v, value: v }, l)))) : null,
+                [["chat", "chat（一代普通）"], ["reserved", "reserved（一代仿真）"], ["reserved2", "reserved2（二代仿真）"], ["closed-agent", "closed-agent（封闭）"], ["simulation", "simulation（=reserved2）"]].map(([v, l]) => h("option", { key: v, value: v }, l)))) : (String(g.group).startsWith("NIKKE") ? h(NikkeStatusCard, { toast }) : null),
           })),
         h("div", { className: "qbw-actions" },
           h(Btn, { kind: "qbw-btn2", onClick: async () => {

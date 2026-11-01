@@ -351,14 +351,30 @@ const TOOL_CONFIG_FLAGS = {
   qq_sticker_note: 'stickerNote',
   qq_set_sticker_remark: 'setStickerRemark',
 };
+const localImageSends = new Map();
 const disabledTools = [];
 {
   const registerTool = server.tool.bind(server);
+  const CALL_LOG = path.join(process.env.HOME || '', 'SurfCore', 'state', 'tool-calls.jsonl');
+  const logToolCall = (name, args) => {
+    try {
+      const key = String(args?.key || '');
+      fs.appendFileSync(CALL_LOG, JSON.stringify({ at: new Date().toISOString(), tool: name, key }) + '\n');
+    } catch { /* 不影响调用 */ }
+  };
   server.tool = (name, ...rest) => {
     const flag = TOOL_CONFIG_FLAGS[name];
     if (flag && cfg.socialV2?.tools?.[flag] === false) {
       disabledTools.push(`${name}(${flag})`);
       return undefined;
+    }
+    const hi = rest.findIndex((x) => typeof x === 'function');
+    if (hi >= 0) {
+      const handler = rest[hi];
+      rest[hi] = async (...args) => {
+        logToolCall(name, args[0]);
+        return handler(...args);
+      };
     }
     return registerTool(name, ...rest);
   };
@@ -1178,9 +1194,31 @@ if (cfg.socialV2?.tools?.sendImage !== false) {
     },
     async ({ key, token, image, replyToMessageId, atUserId }) => {
       try {
+        // 本地图片（仅限 Pixiv 插件缓存/库）：转 base64 再发，并限流 3 张/10 分钟/会话
+        let img = String(image)
+        if (path.isAbsolute(img) && !img.startsWith('file://')) {
+          const roots = [
+            path.join(process.env.HOME || '', '.dsh', 'pixiv-duty', 'cache'),
+            path.join(process.env.HOME || '', '.dsh', 'pixiv-duty', 'library'),
+          ]
+          const resolved = path.resolve(img)
+          if (!roots.some((r) => resolved.startsWith(r + path.sep))) {
+            return { content: [{ type: 'text', text: '只允许发送 Pixiv 插件缓存目录里的图片' }], isError: true }
+          }
+          const now = Date.now()
+          const hits = (localImageSends.get(key) || []).filter((t) => now - t < 10 * 60 * 1000)
+          if (hits.length >= 3) return { content: [{ type: 'text', text: '同一会话 10 分钟最多发 3 张图，先歇一会儿' }], isError: true }
+          hits.push(now)
+          localImageSends.set(key, hits)
+          const buf = fs.readFileSync(resolved)
+          const ext = path.extname(resolved).toLowerCase()
+          const mime = ext === '.png' ? 'image/png' : ext === '.gif' ? 'image/gif' : ext === '.webp' ? 'image/webp' : 'image/jpeg'
+          img = 'base64://' + buf.toString('base64')
+          if (buf.length > 8 * 1024 * 1024) return { content: [{ type: 'text', text: '图片太大（>8MB）' }], isError: true }
+        }
         const data = await agentApi('/api/socialV2/send-image', {
           method: 'POST',
-          body: JSON.stringify({ key, image: String(image), replyToMessageId, atUserId: atUserId ?? null }),
+          body: JSON.stringify({ key, image: img, replyToMessageId, atUserId: atUserId ?? null }),
           headers: { 'x-agent-token': token },
           timeoutMs: 300000
         });
@@ -1191,6 +1229,127 @@ if (cfg.socialV2?.tools?.sendImage !== false) {
     }
   );
 }
+
+server.tool(
+  'qq_note',
+  '当场记一条跨会话共享的笔记：主人明确提出的要求、你答应的事、别人的重要偏好。写进去之后你在任何群/私聊都能看到（唤醒提示里会带最近 3 条）。只在「答应了什么」或「重要偏好」时用，不要什么都记。',
+  {
+    key: z.string().describe('会话 key'),
+    text: z.string().describe('一句话，例如「主人要求群里不要连发超过 2 条」')
+  },
+  async ({ key, text }) => {
+    try {
+      const data = await agentApi('/api/socialV2/note', {
+        method: 'POST',
+        body: JSON.stringify({ key, text }),
+        timeoutMs: 15000
+      });
+      return { content: [{ type: 'text', text: serializeModelData(data) }] };
+    } catch (error) {
+      return { content: [{ type: 'text', text: `记笔记失败：${error?.message ?? error}` }], isError: true };
+    }
+  }
+);
+
+server.tool(
+  'qq_image_source',
+  '反查一张图片的出处（Pixiv/Twitter/番剧）。给 messageId（当前会话里那条图片消息的 id/seq）或直接给图片 URL，返回相似度最高的几个来源：标题、作者、链接。群里问「这图哪来的」时用它。',
+  {
+    key: z.string().describe('会话 key，格式 group:群号 或 private:QQ号'),
+    messageId: z.union([z.number(), z.string()]).optional().describe('图片消息的 id 或 seq'),
+    image: z.string().optional().describe('也可以直接给图片 URL')
+  },
+  async ({ key, messageId, image }) => {
+    try {
+      const data = await agentApi('/api/socialV2/image/source', {
+        method: 'POST',
+        body: JSON.stringify({ key, messageId: messageId ? String(messageId) : '', image: image || '' }),
+        timeoutMs: 60000
+      });
+      return { content: [{ type: 'text', text: serializeModelData(data) }] };
+    } catch (error) {
+      return { content: [{ type: 'text', text: `反查失败：${error?.message ?? error}` }], isError: true };
+    }
+  }
+);
+
+server.tool(
+  'qq_bili_prefetch',
+  '在后台按 360p 下载一个 B站 视频到本地，返回 jobId 和文件路径；下载可能要几分钟，**不会**占工具超时。下完后把 out 路径传给 video_storyboard 读本地文件，长视频用这个。',
+  {
+    url: z.string().describe('B站 视频链接（https://www.bilibili.com/video/BV...）')
+  },
+  async ({ url }) => {
+    try {
+      const data = await agentApi('/api/socialV2/bili/prefetch', {
+        method: 'POST',
+        body: JSON.stringify({ url }),
+        timeoutMs: 20000
+      });
+      return { content: [{ type: 'text', text: serializeModelData(data) }] };
+    } catch (error) {
+      return { content: [{ type: 'text', text: `预下载失败：${error?.message ?? error}` }], isError: true };
+    }
+  }
+);
+
+server.tool(
+  'qq_bili_search',
+  '按关键词搜 B站 视频，返回前几条的 bvid/标题/UP/播放量。当有人提到一个具体名词（刀皮、黑伤、某游戏）但没给链接时，用它找到对应视频；找到后可以再调 video_storyboard 去看。',
+  {
+    query: z.string().describe('搜索关键词'),
+    limit: z.number().optional().describe('返回几条，默认 5')
+  },
+  async ({ query, limit }) => {
+    try {
+      const data = await agentApi('/api/socialV2/bili/search?q=' + encodeURIComponent(query) + '&limit=' + (limit || 5));
+      return { content: [{ type: 'text', text: serializeModelData(data) }] };
+    } catch (error) {
+      return { content: [{ type: 'text', text: `B站搜索失败：${error?.message ?? error}` }], isError: true };
+    }
+  }
+);
+
+server.tool(
+  'qq_remind',
+  '给自己定一个定时提醒：到点后桥接会主动在这个会话发一句你写好的话。适合「明早八点提醒主人吃药」「下午三点问他视频看了没」。时间用毫秒时间戳。',
+  {
+    key: z.string().describe('会话 key，格式 group:群号 或 private:QQ号'),
+    token: z.string().describe('会话令牌'),
+    at: z.number().describe('触发时间，毫秒时间戳'),
+    text: z.string().describe('到点要发的话')
+  },
+  async ({ key, token, at, text }) => {
+    try {
+      const data = await agentApi('/api/socialV2/remind', {
+        method: 'POST',
+        body: JSON.stringify({ key, at, text }),
+        headers: { 'x-agent-token': token },
+        timeoutMs: 15000
+      });
+      return { content: [{ type: 'text', text: serializeModelData(data) }] };
+    } catch (error) {
+      return { content: [{ type: 'text', text: `设定提醒失败：${error?.message ?? error}` }], isError: true };
+    }
+  }
+);
+
+server.tool(
+  'qq_recall_memory',
+  '按关键词检索记忆卡。唤醒提示里的记忆是压缩过的摘要；想不起具体细节（某天聊了什么、某个人的事）时用它查原文片段。一次一个关键词，最多 6 条。',
+  {
+    query: z.string().describe('关键词，如人名、事件、地点'),
+    limit: z.number().optional().describe('最多几条，默认 6')
+  },
+  async ({ query, limit }) => {
+    try {
+      const data = await agentApi('/api/socialV2/memory/search?q=' + encodeURIComponent(query) + '&limit=' + (limit || 6));
+      return { content: [{ type: 'text', text: serializeModelData(data) }] };
+    } catch (error) {
+      return { content: [{ type: 'text', text: `记忆检索失败：${error?.message ?? error}` }], isError: true };
+    }
+  }
+);
 
 if (cfg.socialV2?.tools?.sendTts !== false) {
   server.tool(

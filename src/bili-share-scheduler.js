@@ -73,6 +73,7 @@ export function buildSharePrompt(card, timeLabel, { mode = 'chat', cardSent = fa
   }
   lines.push('3. 不用 Markdown，不 @ 人；句子里的拼音字遵守角色卡（一句最多一个）。');
   lines.push('4. 不聊政治、时政、娱乐圈/明星八卦，只分享好玩的内容。');
+  lines.push('4.4 **先看再评**：写短评之前，如果这个视频你还没看过，先调 `video_storyboard`（input 传视频链接或 bvid）看一眼画面和台词，然后再写。看了不说话比没看就夸强；工具失败就按标题如实说，不要编画面细节。');
   lines.push('4.5 **这条短评是必须的**：每次分享都要发出去，不能省略、不能只回 [SILENT]、不能因为群里没人说话就不发；实在没灵感就用一句吐槽/玩梗顶上。');
   if (String(mode) === 'reserved2') {
     lines.push('5. 你是二代仿真模式，文本不会自动发送：请调用 mcp__snowluma__qq_send_message 把这段内容发到当前群，messages 用字符串（一条即可），不要只输出文本。');

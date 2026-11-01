@@ -635,6 +635,63 @@ export function apply(ctx) {
     }));
   }
 
+  // ── NIKKE 联盟突袭（出刀表）──────────────────────────────────────────────
+  // 数据由 ~/.dsh/surfcore/nikke/union.py 产出：脚本自己抓 blablalink、出图、写 last-run.json。
+  // 这里只做三件事：读状态、按需跑一次、把结果（不发送）回给设置页。
+  const NIKKE_HOME = path.join(process.env.DSH_HOME || path.join(os.homedir(), '.dsh'), 'surfcore', 'nikke');
+  const NIKKE_SCRIPT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'scripts', 'nikke', 'union.py');
+
+  function nikkePython() {
+    const home = process.env.DSH_HOME || path.join(os.homedir(), '.dsh');
+    const venv = path.join(home, 'pixiv-duty', '.venv', 'bin', 'python');
+    return fs.existsSync(venv) ? venv : 'python3';
+  }
+
+  function handleNikkeStatus(res) {
+    const out = { ok: true, home: NIKKE_HOME, script: NIKKE_SCRIPT };
+    out.scriptExists = fs.existsSync(out.script);
+    out.python = nikkePython();
+    try {
+      const st = JSON.parse(fs.readFileSync(path.join(NIKKE_HOME, 'state.json'), 'utf8'));
+      out.login = {
+        savedAt: st.savedAt ?? null,
+        guildId: st.guildId ?? null,
+        areaId: st.areaId ?? null,
+        hasOpenid: Boolean(st.openid),
+      };
+    } catch { out.login = null; }
+    try { out.lastRun = JSON.parse(fs.readFileSync(path.join(NIKKE_HOME, 'last-run.json'), 'utf8')); }
+    catch { out.lastRun = null; }
+    json(res, 200, out);
+  }
+
+  async function handleNikkeRun(req, res) {
+    if (req.method !== 'POST') { json(res, 405, { ok: false, error: '只支持 POST' }); return; }
+    const script = NIKKE_SCRIPT;
+    if (!fs.existsSync(script)) { json(res, 200, { ok: false, error: 'union.py 不存在' }); return; }
+    const py = nikkePython();
+    const started = Date.now();
+    const out = await new Promise((resolve) => {
+      const child = spawn(py, [script], {
+        cwd: NIKKE_HOME,
+        env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1' },
+      });
+      let stdout = '';
+      let stderr = '';
+      const timer = setTimeout(() => { try { child.kill('SIGKILL'); } catch {} }, 60000);
+      child.stdout.on('data', (d) => { stdout += d.toString(); });
+      child.stderr.on('data', (d) => { stderr += d.toString(); });
+      child.on('error', (e) => { clearTimeout(timer); resolve({ ok: false, error: e?.message || String(e) }); });
+      child.on('close', () => {
+        clearTimeout(timer);
+        const line = stdout.trim().split('\n').filter(Boolean).pop() || '';
+        try { resolve(JSON.parse(line)); }
+        catch { resolve({ ok: false, error: `输出不是 JSON：${(stderr || stdout).slice(-200)}` }); }
+      });
+    });
+    json(res, 200, { ...out, ms: out.ms ?? (Date.now() - started) });
+  }
+
   // ── 概览 ────────────────────────────────────────────────────────────────
   async function overview() {
     const all = readAll();
@@ -2641,6 +2698,8 @@ if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output 
     const url = new URL(req.url, 'http://127.0.0.1');
     const pathname = url.pathname;
     if (pathname === `${API_PREFIX}/overview`) { json(res, 200, await overview()); return; }
+    if (pathname === `${API_PREFIX}/nikke/status`) { handleNikkeStatus(res); return; }
+    if (pathname === `${API_PREFIX}/nikke/run`) { await handleNikkeRun(req, res); return; }
     if (pathname === `${API_PREFIX}/config`) { await handleConfig(req, res); return; }
     if (pathname === `${API_PREFIX}/characters`) { await handleCharacters(req, res, url); return; }
     if (pathname === `${API_PREFIX}/persona`) { await handlePersona(req, res); return; }

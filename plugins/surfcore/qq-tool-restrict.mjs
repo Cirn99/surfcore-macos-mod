@@ -164,6 +164,12 @@ const SAFE_PREFIXES = [
   'mcp__snowluma__',
   'mcp__snowluma-host__',
   'mcp__web-search-safe__',
+  'pixiv_',
+  'video_',
+  'mcp__pixiv__',
+  'mcp__pixiv-duty__',
+  'pixiv-duty_',
+  'mcp__pixiv-duty__pixiv_',
 ]
 
 // 无害模型侧工具：ask_user_question 用于把问题转给管理员/用户，
@@ -209,6 +215,8 @@ export function apply(ctx) {
     if (typeof name !== 'string' || name.length === 0) return '工具名无效，已拒绝'
     if (SAFE_EXACT.has(name)) return
     if (SAFE_PREFIXES.some((prefix) => name.startsWith(prefix))) return
+    // Pixiv 插件的工具名带 MCP 命名空间，统一放行任何含 pixiv 的工具
+    if (name.toLowerCase().includes('pixiv')) return
     return `工具 "${name}" 不在 QQ 桥接白名单内，已拒绝（仅允许 QQ MCP 工具与无害模型侧工具）`
   })
 }

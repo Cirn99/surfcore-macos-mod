@@ -135,6 +135,45 @@ const DSH_HOME = process.env.DSH_HOME || path.join(os.homedir(), '.dsh');
 // 桥接读它做「QQ 今日额度 / 总额度」闸门；插件没跑时回落到自己的 ledger。
 // 路径用桥接自己的 DSH_HOME 拼，别在 VM 测试里落到真实 ~/.dsh。
 const SURFCORE_DIR = path.join(DSH_HOME, 'surfcore');
+
+// ── NIKKE 联盟突袭出刀表：固定口令触发，桥接直接执行（不经过模型）────────────
+// 数据源 blablalink；登录态由 ~/.dsh/surfcore/nikke/logincjs 抓的 cookie 提供。
+const NIKKE_UNION_HOME = path.join(SURFCORE_DIR, 'nikke');
+const NIKKE_UNION_SCRIPT = path.join(ROOT, 'scripts', 'nikke', 'union.py');
+const NIKKE_UNION_PY = path.join(DSH_HOME, 'pixiv-duty', '.venv', 'bin', 'python');
+const NIKKE_UNION_DEFAULTS = Object.freeze({
+  enabled: true,
+  groups: [],
+  keywords: ['查会战', '会战表', '谁没打', '谁没出刀', '出刀表', '查出刀'],
+  groupCooldownSec: 120,
+  userCooldownSec: 60,
+  noticeCooldownSec: 30,
+});
+
+/** 把 config.json 的 nikke 段收敛成可用配置：数组/逗号串都认，缺省值兜底。 */
+function nikkeUnionSettings(cfg) {
+  const raw = (cfg && typeof cfg.nikke === 'object' && cfg.nikke) || {};
+  const asList = (v, fallback) => {
+    if (Array.isArray(v)) {
+      const list = v.map((x) => String(x ?? '').trim()).filter(Boolean);
+      return list.length ? list : fallback;
+    }
+    const list = String(v ?? '').split(/[,，\s]+/).map((x) => x.trim()).filter(Boolean);
+    return list.length ? list : fallback;
+  };
+  const num = (v, fallback, min = 0) => {
+    const n = Number(v);
+    return Number.isFinite(n) && n >= min ? n : fallback;
+  };
+  return {
+    enabled: raw.enabled !== false,
+    groups: asList(raw.groups, NIKKE_UNION_DEFAULTS.groups),
+    keywords: asList(raw.keywords, NIKKE_UNION_DEFAULTS.keywords),
+    groupCooldownMs: num(raw.groupCooldownSec, NIKKE_UNION_DEFAULTS.groupCooldownSec) * 1000,
+    userCooldownMs: num(raw.userCooldownSec, NIKKE_UNION_DEFAULTS.userCooldownSec) * 1000,
+    noticeCooldownMs: num(raw.noticeCooldownSec, NIKKE_UNION_DEFAULTS.noticeCooldownSec) * 1000,
+  };
+}
 // 角色人格：桥接进程启动时解析一次当前角色。切换角色由插件完成「停桥接 → 换指针 → 启桥接」，
 // 所以这里不需要在运行中动态换路径；任务开始后也只写自己捕获的这一份目录。
 const ACTIVE_CHARACTER = readCurrentCharacter();
@@ -1244,6 +1283,11 @@ function loadConfig() {
   // DSH 每次重启可能换 Web 端口（GUI URL 是动态的）。DSH 启动的子进程会带
   // DSH_WEB_URL；优先用它，避免桥接还指着上一次的端口。手动从 Explorer 启动时
   // 没有这个环境变量，就回退 config.json。
+  // NIKKE 出刀表的可调参数（设置页写进 config.json 的 nikke 段）。
+  // cfg 是按字段逐个构造的，不 spread 整个文件，所以这里必须显式带出来，
+  // 否则界面改了也读不到（表现是「保存了但没生效」）。
+  cfg.nikke = (file.nikke && typeof file.nikke === 'object' && !Array.isArray(file.nikke)) ? file.nikke : {};
+
   const dshWebUrl = String(process.env.DSH_WEB_URL ?? '').trim();
   if (dshWebUrl) cfg.dsh.baseUrl = dshWebUrl;
 
@@ -2756,6 +2800,9 @@ async function main() {
   // ── 豆包生图（CDP 驱动本机豆包客户端）──────────────────────────────────
   // 不花钱、不用 API Key：连上 127.0.0.1:9222，切到「图像生成」，发提示词，
   // 等聊天区出现新图（naturalWidth>=1000），拿 URL 带上 Cookie 下载。
+  const nikkeUnionAt = new Map();
+  const nikkeUnionUserAt = new Map();
+  const nikkeUnionNoticeAt = new Map();
   const drawLastAt = new Map();
   const drawCount = new Map();
   const drawDay = new Map();
@@ -2785,12 +2832,158 @@ async function main() {
     return { page, call, close: () => { try { ws.close(); } catch {} } };
   }
 
+  // ── 定时提醒：她可以让自己在指定时间主动说一句话 ──
+  const REMIND_FILE = path.join(STATE_DIR, 'reminders.json');
+  function readReminders() {
+    try { return JSON.parse(fs.readFileSync(REMIND_FILE, 'utf8')); } catch { return []; }
+  }
+  function writeReminders(list) {
+    try { fs.writeFileSync(REMIND_FILE, JSON.stringify(list.slice(-200), null, 2) + '\n'); } catch {}
+  }
+  function addReminder(key, at, text) {
+    const list = readReminders();
+    list.push({ id: crypto.randomBytes(4).toString('hex'), key, at, text: String(text).slice(0, 200), sent: false });
+    writeReminders(list);
+    return list[list.length - 1];
+  }
+  function startReminderLoop() {
+    setInterval(() => {
+      try {
+        const list = readReminders();
+        const now = Date.now();
+        let changed = false;
+        for (const r of list) {
+          if (r.sent || !r.at || Number(r.at) > now) continue;
+          try { sendToQQ(r.key, r.text); } catch {}
+          r.sent = true; changed = true;
+          log(`[提醒] 已发送 ${r.key}: ${String(r.text).slice(0, 20)}`);
+        }
+        if (changed) writeReminders(list);
+      } catch {}
+    }, 60 * 1000).unref?.();
+  }
+  startReminderLoop();
+
   // ── B站视频：外部命令与任务表 ───────────────────────────────────────────
   const videoJobs = new Map();
 
   function surfcoreRootPath() {
     return path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
   }
+  // ── 兴趣闲逛：闲置 2 小时以上时，把 B站 记忆里的一条新内容写进事实库，当作她的谈资 ──
+  function idleBrowseTick() {
+    try {
+      if (cfg.socialV2?.idleBrowse?.enabled === false) return;
+      const idleMs = Math.max(3600000, Number(cfg.socialV2?.idleBrowse?.idleMs) || 7200000);
+      let lastAt = 0;
+      for (const st of socialV2.conversations.values()) {
+        const msgs = st?.recentMessages ?? [];
+        const t = msgs.length ? Number(msgs[msgs.length - 1].time) || 0 : 0;
+        if (t > lastAt) lastAt = t;
+      }
+      if (!lastAt || Date.now() - lastAt < idleMs) return;
+      const brief = String(biliMemory?.briefBlock?.() || '').trim();
+      if (!brief) return;
+      const f = factsFile();
+      if (!f) return;
+      const line = brief.split(/\n+/).map((x) => x.trim()).filter((x) => x.length > 12)[0];
+      if (!line) return;
+      const today = new Date().toISOString().slice(0, 10);
+      if (fs.existsSync(f) && fs.readFileSync(f, 'utf8').includes(today + '|闲逛')) return;
+      fs.appendFileSync(f, JSON.stringify({ at: new Date().toISOString(), source: '闲逛', fact: `${today}|闲逛 ${line.slice(0, 120)}` }) + '\n');
+      log('[闲逛] 记下一条 B站 谈资');
+    } catch { /* 静默 */ }
+  }
+  setInterval(idleBrowseTick, 30 * 60 * 1000).unref?.();
+
+  // 每天挑一条「主人看过、还没推荐过」的视频，写进未完成事项，等她下次醒来主动提
+  // 每周人文课：轮换主题写一段感想，沉淀成人格成长记录
+  const GROW_THEMES = ['告别', '好奇心', '一个人待着', '善意', '被误解', '坚持一件小事', '时间的重量', '陪伴', '体面', '遗憾'];
+  function growthFile() {
+    try { return path.join(path.dirname(MEMORY_CARD_PATHS.promptQq), 'memory-growth.jsonl'); } catch { return ''; }
+  }
+  function growthBlock() {
+    try {
+      const f = growthFile();
+      if (!f || !fs.existsSync(f)) return '';
+      const rows = fs.readFileSync(f, 'utf8').split(/\n+/).filter(Boolean).slice(-3)
+        .map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+      return rows.map((r) => `· 关于「${r.theme}」：${String(r.text).slice(0, 160)}`).join('\n');
+    } catch { return ''; }
+  }
+  async function weeklyReflection() {
+    try {
+      const keyFile = path.join(os.homedir(), '.dsh', 'pixiv-duty', 'deepseek-key');
+      const apiKey = cfg.socialV2?.memory?.extractApiKey || (fs.existsSync(keyFile) ? fs.readFileSync(keyFile, 'utf8').trim() : '');
+      if (!apiKey) return;
+      const week = Math.floor(Date.now() / (7 * 86400000));
+      const theme = GROW_THEMES[week % GROW_THEMES.length];
+      const r = await fetch('https://api.deepseek.com/chat/completions', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: 'Bearer ' + apiKey },
+        body: JSON.stringify({
+          model: cfg.socialV2?.memory?.extractModel || 'deepseek-chat',
+          messages: [
+            { role: 'system', content: '你是一个有点损、但不缺真心的 QQ 群 AI，叫大肥鱼。用第一人称写 100~150 字，谈你对给定主题的真实想法。口语、别端着、不要总结句、不要说教。' },
+            { role: 'user', content: `主题：${theme}` }
+          ],
+          temperature: 0.9,
+          max_tokens: 400
+        }),
+        signal: AbortSignal.timeout(40000)
+      });
+      if (!r.ok) return;
+      const j = await r.json();
+      const text = String(j.choices?.[0]?.message?.content || '').trim().slice(0, 300);
+      if (text.length < 30) return;
+      const f = growthFile();
+      if (!f) return;
+      fs.appendFileSync(f, JSON.stringify({ at: new Date().toISOString(), theme, text }) + '\n');
+      log(`[成长] 本周主题「${theme}」已写下`);
+    } catch { /* 静默 */ }
+  }
+  setInterval(() => { void weeklyReflection(); }, 7 * 24 * 3600 * 1000).unref?.();
+
+  function pickRecommendation() {
+    try {
+      if (cfg.socialV2?.biliRecommend?.enabled === false) return;
+      const f = path.join(os.homedir(), '.dsh', 'surfcore', 'bili', 'interest.json');
+      if (!fs.existsSync(f)) return;
+      const j = JSON.parse(fs.readFileSync(f, 'utf8'));
+      const vids = Object.entries(j.videos || {}).filter(([, v]) => v && v.title && !v.recommended);
+      if (!vids.length) return;
+      // 按兴趣标签打分：标题/标签命中 top 标签越多越优先
+      const top = Object.entries(j.tags || {}).sort((a, b) => b[1] - a[1]).slice(0, 20).map(([t]) => String(t).toLowerCase());
+      const scoreOf = ([, v]) => {
+        const hay = (String(v.title || '') + ' ' + (Array.isArray(v.tags) ? v.tags.join(' ') : '')).toLowerCase();
+        let n = 0;
+        for (const t of top) if (t && hay.includes(t)) n += 1;
+        return n;
+      };
+      const ranked = vids.map((x) => ({ x, s: scoreOf(x) })).sort((a, b) => b.s - a.s);
+      const [bv, v] = (ranked[0].s > 0 ? ranked[0] : ranked[Math.floor(Math.random() * ranked.length)]).x;
+      v.recommended = new Date().toISOString();
+      fs.writeFileSync(f, JSON.stringify(j, null, 2) + '\n');
+      const pf = pendingFile();
+      if (!pf) return;
+      fs.appendFileSync(pf, JSON.stringify({ at: new Date().toISOString(), source: '推荐', text: `主动跟主人聊这条他看过的视频：${String(v.title).slice(0, 60)}（https://www.bilibili.com/video/${bv}）` }) + '\n');
+      log(`[推荐] 准备聊 ${bv}（${String(v.title).slice(0, 20)}）`);
+    } catch { /* 静默 */ }
+  }
+  setInterval(pickRecommendation, 24 * 3600 * 1000).unref?.();
+
+  // 每周更新一次 B站 兴趣画像（从聊天里的 BV + 主人观看历史里学）
+  setInterval(() => {
+    try {
+      const script = path.join(surfcoreRoot, 'scripts', 'bili-interest.mjs');
+      if (!fs.existsSync(script)) return;
+      const child = spawn(process.execPath, [script], { stdio: 'ignore', detached: true });
+      child.unref();
+      log('[兴趣] 每周兴趣画像更新已触发');
+    } catch (e) { log(`[兴趣] 更新失败：${e?.message ?? e}`); }
+  }, 7 * 24 * 3600 * 1000).unref?.();
+
+
   const surfcoreRoot = surfcoreRootPath();
 
   function videoPython() {
@@ -3133,9 +3326,17 @@ async function main() {
     const remark = String(target.text || '').replace(/^\[.*?\]$/, '').trim().slice(0, 20) || label;
     let emotion = '';
     try { emotion = detectEmotions(replyText || String(target.text || ''))?.[0]?.label || ''; } catch {}
+    // 收图时记下「当时在聊什么」，作为以后主动发图的场景线索
+    let scene = '';
+    try {
+      const idx = (st.recentMessages || []).findIndex((m) => String(m.seq) === String(target.seq));
+      const around = (st.recentMessages || []).slice(Math.max(0, idx - 3), idx + 1)
+        .filter((m) => m && String(m.text || '').trim()).map((m) => `${m.isSelf ? '她' : '对方'}:${String(m.text).slice(0, 40)}`);
+      scene = around.join(' | ').slice(0, 110);
+    } catch {}
     const result = await collectStickerV2(key, String(target.seq), remark, {
       emotion,
-      content: `群里的${label}`,
+      content: scene ? `群里的${label}｜当时：${scene}` : `群里的${label}`,
       keywords: []
     });
     st.faceCollectCount = Number(st.faceCollectCount || 0) + 1;
@@ -3243,9 +3444,13 @@ async function main() {
     let emojiId = String(addRes.data?.emoji_id || '');
     // NapCat 的 add_custom_face 不返回 emoji_id：用同步后的「新增条目」反推。
     if (!emojiId) {
-      const fresh = await syncStickerLibrary(true);
-      const added = (fresh?.entries ?? stickerEntries).filter((e) => !beforeFaceIds.has(String(e.id)));
-      emojiId = String(added[added.length - 1]?.id || '');
+      // QQ 收藏是异步落库的：立即同步常常还看不到，重试几次（1.5s/3s/4.5s）
+      for (let attempt = 0; attempt < 3 && !emojiId; attempt += 1) {
+        if (attempt > 0) await new Promise((r) => setTimeout(r, 1500));
+        const fresh = await syncStickerLibrary(true);
+        const added = (fresh?.entries ?? stickerEntries).filter((e) => !beforeFaceIds.has(String(e.id)));
+        emojiId = String(added[added.length - 1]?.id || '');
+      }
     }
     if (!emojiId) throw new Error('add_custom_face 未返回 emoji_id，且同步后没发现新表情');
     const maxRemarkChars = Math.max(1, Number(cfg.socialV2?.sticker?.collect?.maxRemarkChars) || 20);
@@ -4651,7 +4856,12 @@ async function main() {
         if (!hasToken) {
           const tokenlessAgentAllowed = url.pathname === '/api/status'
             || url.pathname.startsWith('/api/send/')
-            || url.pathname.startsWith('/api/images/');
+            || url.pathname.startsWith('/api/images/')
+            // 只读/下载类：预下载与 B站 搜索不涉及发送，允许无令牌调用
+            || url.pathname === '/api/socialV2/image/source'
+            || url.pathname === '/api/socialV2/bili/prefetch'
+            || url.pathname === '/api/socialV2/bili/search'
+            || url.pathname.startsWith('/api/socialV2/memory/search');
           if (!tokenlessAgentAllowed) {
             sendJson({ ok: false, error: '未授权：该接口的智能体调用必须携带有效的会话令牌' }, 403);
             return;
@@ -5185,6 +5395,213 @@ async function main() {
         }
 
         // ── 黑话库管理 ──────────────────────────────────────────────────────
+        if (req.method === 'POST' && url.pathname === '/api/socialV2/remind') {
+          try {
+            const body = await readBody();
+            const key = String(body.key || '').trim();
+            const text = String(body.text || '').trim();
+            const at = Number(body.at) || 0;
+            if (!key || !text || !at) { sendJson({ ok: false, error: 'key/text/at 不能为空' }, 400); return; }
+            if (at < Date.now() - 60000) { sendJson({ ok: false, error: '时间已经过去了' }, 400); return; }
+            const r = addReminder(key, at, text);
+            sendJson({ ok: true, reminder: r });
+          } catch (error) { sendJson({ ok: false, error: String(error?.message ?? error) }, 500); }
+          return;
+        }
+
+        if (req.method === 'POST' && url.pathname === '/api/socialV2/bili/prefetch') {
+          try {
+            const body = await readBody();
+            const url0 = String(body.url || '').trim();
+            if (!/^https?:\/\//.test(url0)) { sendJson({ ok: false, error: '需要 http(s) 链接' }, 400); return; }
+            const id = crypto.randomBytes(4).toString('hex');
+            const dir = path.join(STATE_DIR, 'bili-dl');
+            fs.mkdirSync(dir, { recursive: true });
+            const out = path.join(dir, id + '.mp4');
+            const job = { id, url: url0, out, status: 'running', startedAt: Date.now(), log: [] };
+            videoJobs.set('dl-' + id, job);
+            const ytdlp = '/usr/local/bin/yt-dlp';
+            const child = spawn(ytdlp, ['-f', 'b[height<=360][acodec!=none]/bv*[height<=360]+ba/b', '--merge-output-format', 'mp4', '-o', out, url0], { stdio: ['ignore', 'pipe', 'pipe'] });
+            child.stderr.on('data', (d) => { job.log.push(String(d).slice(-200)); if (job.log.length > 30) job.log.shift(); });
+            child.on('close', (code) => {
+              job.status = code === 0 && fs.existsSync(out) ? 'done' : 'failed';
+              job.finishedAt = Date.now();
+              if (job.status === 'done') log(`[下载] 完成 ${id} → ${out}`);
+            });
+            sendJson({ ok: true, id, jobId: 'dl-' + id, out });
+          } catch (error) { sendJson({ ok: false, error: String(error?.message ?? error) }, 500); }
+          return;
+        }
+
+        if (req.method === 'POST' && url.pathname === '/api/socialV2/note') {
+          try {
+            const body = await readBody();
+            const text = String(body.text || '').trim();
+            if (!text) { sendJson({ ok: false, error: 'text 不能为空' }, 400); return; }
+            const row = addNote(text, body.key);
+            sendJson(row ? { ok: true, note: row } : { ok: false, error: '写入失败' }, row ? 200 : 500);
+          } catch (error) { sendJson({ ok: false, error: String(error?.message ?? error) }, 500); }
+          return;
+        }
+
+        if (req.method === 'POST' && url.pathname === '/api/socialV2/image/source') {
+          try {
+            const body = await readBody();
+            const key = String(body.key || '').trim();
+            const messageId = String(body.messageId || '').trim();
+            let imageUrl = String(body.image || '').trim();
+            if (!imageUrl && key && messageId) {
+              const st = getSocialV2State(key);
+              const m = (st.recentMessages || []).find((x) => String(x.seq) === messageId || String(x.messageId) === messageId);
+              const media = (m?.media || []).find((x) => x && (x.url || x.file));
+              imageUrl = media?.url || '';
+              if (!imageUrl && media?.file) imageUrl = String(media.file);
+            }
+            // QQ 图床有防盗链：优先用 NapCat 本地缓存/ get_image 拿 base64，最后才试直连
+            let buf = null;
+            const mediaAny = imageUrl;
+            if (mediaAny && fs.existsSync(mediaAny) && fs.statSync(mediaAny).isFile()) {
+              buf = fs.readFileSync(mediaAny);
+            }
+            if (!buf && imageUrl) {
+              try {
+                const gi = await bot.request('get_image', { file: imageUrl });
+                const b64 = gi?.data?.base64 || '';
+                if (b64) buf = Buffer.from(b64, 'base64');
+                else if (gi?.data?.file && fs.existsSync(gi.data.file)) buf = fs.readFileSync(gi.data.file);
+              } catch {}
+            }
+            if (!buf && imageUrl.startsWith('base64://')) buf = Buffer.from(imageUrl.slice(9), 'base64');
+            if (!buf && imageUrl) {
+              for (const ref of ['https://qun.qq.com/', 'https://gchat.qpic.cn/']) {
+                try {
+                  const r = await fetch(imageUrl, { headers: { referer: ref, 'user-agent': 'Mozilla/5.0' }, signal: AbortSignal.timeout(20000) });
+                  if (r.ok) { buf = Buffer.from(await r.arrayBuffer()); break; }
+                } catch {}
+              }
+            }
+            if (!buf) { sendJson({ ok: false, error: '拿不到图片内容（QQ 防盗链）：可以让主人把图转成链接或直接发图给本地' }, 502); return; }
+            const apiKey = String(cfg.socialV2?.imageSource?.apiKey || '');
+            if (!apiKey) { sendJson({ ok: false, error: '未配置 SauceNAO key' }, 400); return; }
+            // saucenao 在国内直连会被 reset，走本机代理 + curl
+            const tmp = path.join(os.tmpdir(), 'sauce-' + crypto.randomBytes(3).toString('hex') + '.png');
+            fs.writeFileSync(tmp, buf);
+            let text = '';
+            try {
+              const proxyUrl = String(cfg.socialV2?.imageSource?.proxy || 'http://127.0.0.1:7890');
+              const curlEnv = { ...process.env, HTTP_PROXY: proxyUrl, HTTPS_PROXY: proxyUrl, ALL_PROXY: proxyUrl, NO_PROXY: '127.0.0.1,localhost' };
+              const args = ['-sS', '-m', '40', '--retry', '3', '--retry-all-errors', '--retry-delay', '2', '--http1.1', '-x', proxyUrl, '-A', 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36',
+                '-F', `file=@${tmp}`, '-F', 'output_type=2', '-F', 'numres=3', '-F', `api_key=${apiKey}`,
+                'https://saucenao.com/search.php'];
+              try {
+                text = execFileSync('curl', args, { encoding: 'utf8', timeout: 60000, env: curlEnv });
+              } catch (e) {
+                const detail = String(e?.stderr || e?.message || e).slice(0, 200);
+                sendJson({ ok: false, error: 'SauceNAO 请求失败：' + detail }, 502);
+                return;
+              }
+            } catch (e) {
+            }
+            let j = {};
+            try { j = JSON.parse(text); } catch { sendJson({ ok: false, error: 'SauceNAO 返回异常：' + text.slice(0, 120) }, 502); return; }
+            const results = (j.results || []).filter((r) => Number(r.header?.similarity) >= 50).slice(0, 3).map((r) => ({
+              similarity: Number(r.header.similarity),
+              title: r.data?.title || r.data?.material || r.data?.eng_name || '',
+              author: r.data?.author_name || r.data?.creator || r.data?.member_name || '',
+              url: r.data?.ext_urls?.[0] || r.data?.source || '',
+              index: r.header?.index_name || ''
+            }));
+            // trace.moe：番剧截图溯源（直连可用，免费）
+            let anime = [];
+            try {
+              const tmo = execFileSync('curl', ['-sS', '-m', '25', '-F', `file=@${tmp}`, 'https://api.trace.moe/search?cutBorders'],
+                { encoding: 'utf8', timeout: 30000 });
+              const tj = JSON.parse(tmo || '{}');
+              anime = (tj.result || []).filter((r) => r.similarity >= 0.7).slice(0, 2).map((r) => ({
+                similarity: Math.round(r.similarity * 1000) / 10,
+                anilist: r.anilist,
+                episode: r.episode,
+                at: Math.round(r.from),
+                title: r.filename || ''
+              }));
+            } catch { /* 查不到就算了 */ }
+            // anilist 补番名（直连可用）
+            if (anime.length) {
+              try {
+                const ids = anime.map((a) => a.anilist).filter(Boolean);
+                const q = `query{Page(perPage:${ids.length}){media(id_in:[${ids.join(',')}],type:ANIME){id title{native romaji english}}}}`;
+                const ar = await fetch('https://graphql.anilist.co', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ query: q }), signal: AbortSignal.timeout(15000) });
+                const aj = await ar.json();
+                const map = new Map((aj.data?.Page?.media || []).map((m) => [m.id, m.title?.native || m.title?.english || m.title?.romaji || '']));
+                for (const a of anime) a.name = map.get(a.anilist) || '';
+              } catch { /* 拿不到番名就算了 */ }
+            }
+            try { fs.unlinkSync(tmp); } catch {}
+            sendJson({ ok: true, results, count: results.length, anime });
+          } catch (error) { sendJson({ ok: false, error: String(error?.message ?? error) }, 500); }
+          return;
+        }
+
+        if (req.method === 'GET' && url.pathname === '/api/socialV2/bili/search') {
+          try {
+            const q = String(url.searchParams.get('q') || '').trim();
+            const limit = Math.max(1, Math.min(10, Number(url.searchParams.get('limit')) || 5));
+            if (!q) { sendJson({ ok: false, error: 'q 不能为空' }, 400); return; }
+            const u = 'https://api.bilibili.com/x/web-interface/search/type?search_type=video&keyword=' + encodeURIComponent(q) + '&page=1';
+            const r = await fetch(u, { headers: (() => {
+              const c = { 'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36', referer: 'https://search.bilibili.com/' };
+              try {
+                const f = path.join(os.homedir(), '.dsh', 'surfcore', 'bili', 'credentials.json');
+                if (fs.existsSync(f)) { const cr = JSON.parse(fs.readFileSync(f, 'utf8')); c.cookie = `SESSDATA=${cr.sessdata}; bili_jct=${cr.bili_jct}; buvid3=${cr.buvid3 || ''}`; }
+              } catch {}
+              return c;
+            })(), signal: AbortSignal.timeout(15000) });
+            const j = await r.json();
+            const items = ((j.data?.result || [])).slice(0, limit).map((v) => ({
+              bvid: v.bvid, title: String(v.title || '').replace(/<[^>]+>/g, ''), author: v.author, play: v.play,
+              duration: v.duration, pubdate: v.pubdate
+            }));
+            sendJson({ ok: true, query: q, items });
+          } catch (error) { sendJson({ ok: false, error: String(error?.message ?? error) }, 500); }
+          return;
+        }
+
+        if (req.method === 'GET' && url.pathname === '/api/socialV2/memory/search') {
+          try {
+            const q = String(url.searchParams.get('q') || '').trim();
+            const limit = Math.max(1, Math.min(20, Number(url.searchParams.get('limit')) || 6));
+            if (!q) { sendJson({ ok: false, error: 'q 不能为空' }, 400); return; }
+            const raw = memoryCardPromptBlock();
+            const lines = raw.split(/\n+/).map((x) => x.trim()).filter((x) => x.length > 1);
+            try {
+              const f = factsFile();
+              if (f && fs.existsSync(f)) {
+                for (const line of fs.readFileSync(f, 'utf8').split(/\n+/)) {
+                  try { const o = JSON.parse(line); if (o?.fact) lines.push('· ' + String(o.fact)); } catch {}
+                }
+              }
+            } catch {}
+            const terms = q.toLowerCase().split(/\s+/).filter(Boolean);
+            const scored = [];
+            for (let i = 0; i < lines.length; i += 1) {
+              const line = lines[i];
+              const low = line.toLowerCase();
+              let score = 0;
+              for (const t of terms) if (low.includes(t)) score += 3;
+              if (score === 0 && i > 0) {
+                const ctx = (lines[i - 1] + line).toLowerCase();
+                for (const t of terms) if (ctx.includes(t)) score += 1;
+              }
+              if (score > 0) scored.push({ score, text: line.slice(0, 400) });
+            }
+            scored.sort((a, b) => b.score - a.score);
+            sendJson({ ok: true, query: q, total: lines.length, matches: scored.slice(0, limit) });
+          } catch (error) {
+            sendJson({ ok: false, error: String(error?.message ?? error) }, 500);
+          }
+          return;
+        }
+
         if (req.method === 'GET' && url.pathname === '/api/socialV2/mods-status') {
           try {
             const today = new Date().toISOString().slice(0, 10);
@@ -11700,7 +12117,23 @@ async function main() {
       personaText ? `【人格卡（你是这样的人）】\n${personaText.slice(0, 2200)}` : '',
       identityLine,
       adminText,
-      memoryCardText ? `【记忆卡】\n${memoryCardText.slice(0, 2400)}` : '',
+      growthBlock() ? `【你最近想明白的事】\n${growthBlock()}\n（这是你自己的想法，可以自然带出来，别复述）` : '',
+      (st.memeHint && Date.now() - Number(st.memeHint.at || 0) < 86400000) ? `【梗的背景】${st.memeHint.term}：${st.memeHint.text}（自然理解，不要照念）` : '',
+      memoryCardText ? (() => {
+        const b = memoryBlocks(memoryCardText);
+        const parts = [];
+        if (b.continuity) parts.push(`【连续性（性格/相处状态/没说完的话）】\n${b.continuity}`);
+        const nb = notesBlock();
+        if (nb) parts.push(`【记下来的事】\n${nb}`);
+        const rf = recentFactsBlock();
+        if (rf) parts.push(`【最近听到的事（跨会话）】\n${rf}`);
+        const pend = pendingBlock();
+        if (pend) parts.push(`【未完成的事项】\n${pend}`);
+        if (b.recent) parts.push(`【近期（最近几天的事）】\n${b.recent}`);
+        if (b.other) parts.push(`【其它记忆】\n${b.other}`);
+        parts.push('（想不起细节时用 qq_recall_memory 按关键词查原文）');
+        return parts.join('\n');
+      })() : '',
       biliBrief ? `【B站记忆】\n${biliBrief.slice(0, 1800)}` : '',
     ].filter(Boolean);
   }
@@ -12649,6 +13082,145 @@ async function main() {
   // 记忆卡注入块：插件每次整理后原子写 memory-card-prompt-qq.md，这里按 mtime 缓存读。
   // 不解析 JSON、不依赖插件代码——桥接和插件是不同进程，文件是唯一契约。
   let memoryCardPromptCache = { key: '', text: '' };
+  // 动态记忆：唤醒前把最近几条消息抽成「长期事实」，追加到 memory-facts.jsonl。
+  // 失败静默，不影响本次回复；同一会话 5 分钟内不重复抽。
+  const factExtractAt = new Map();
+  function factsFile() {
+    try { return path.join(path.dirname(MEMORY_CARD_PATHS.promptQq), 'memory-facts.jsonl'); } catch { return ''; }
+  }
+  function pendingFile() {
+    try { return path.join(path.dirname(MEMORY_CARD_PATHS.promptQq), 'memory-pending.jsonl'); } catch { return ''; }
+  }
+  // 跨会话近况：把最近 24 小时抽到的事实（不管来自哪个会话）带进每次唤醒
+  // 当场记的笔记（跨会话共享）：她答应的事、主人的偏好
+  function notesFile() {
+    try { return path.join(path.dirname(MEMORY_CARD_PATHS.promptQq), 'memory-notes.jsonl'); } catch { return ''; }
+  }
+  function addNote(text, key) {
+    const f = notesFile();
+    if (!f) return null;
+    const row = { at: new Date().toISOString(), from: String(key || ''), text: String(text).slice(0, 200) };
+    try { fs.appendFileSync(f, JSON.stringify(row) + '\n'); } catch { return null; }
+    return row;
+  }
+  function notesBlock() {
+    try {
+      const f = notesFile();
+      if (!f || !fs.existsSync(f)) return '';
+      return fs.readFileSync(f, 'utf8').split(/\n+/).filter(Boolean).slice(-3)
+        .map((l) => { try { const o = JSON.parse(l); return `· ${String(o.text).slice(0, 90)}`; } catch { return ''; } })
+        .filter(Boolean).join('\n');
+    } catch { return ''; }
+  }
+
+  function recentFactsBlock() {
+    try {
+      const f = factsFile();
+      if (!f || !fs.existsSync(f)) return '';
+      const cut = Date.now() - 24 * 3600 * 1000;
+      const rows = fs.readFileSync(f, 'utf8').split(/\n+/).filter(Boolean)
+        .map((l) => { try { return JSON.parse(l); } catch { return null; } })
+        .filter((x) => x && x.fact && Date.parse(x.at || '') >= cut)
+        .slice(-6)
+        .map((x) => `· [${String(x.source || '').replace('private:', '私聊 ').replace('group:', '群 ')}] ${String(x.fact).slice(0, 90)}`);
+      return rows.join('\n');
+    } catch { return ''; }
+  }
+
+  function pendingBlock() {
+    try {
+      const f = pendingFile();
+      if (!f || !fs.existsSync(f)) return '';
+      const items = fs.readFileSync(f, 'utf8').split(/\n+/).filter(Boolean).slice(-20)
+        .map((l) => { try { return JSON.parse(l); } catch { return null; } })
+        .filter((x) => x && x.text)
+        .slice(-5)
+        .map((x) => `· ${String(x.text).slice(0, 120)}`);
+      return items.join('\n');
+    } catch { return ''; }
+  }
+
+  function queueFactExtraction(key, st) {
+    try {
+      if (cfg.socialV2?.memory?.extractFacts === false) return;
+      const last = factExtractAt.get(key) ?? 0;
+      if (Date.now() - last < 5 * 60 * 1000) return;
+      const msgs = (st?.recentMessages ?? []).slice(-10)
+        .map((m) => `${m.isSelf ? '她' : '对方'}：${String(m.text ?? '').slice(0, 200)}`)
+        .filter((x) => x.length > 4);
+      if (msgs.length < 3) return;
+      factExtractAt.set(key, Date.now());
+      const keyFile = path.join(os.homedir(), '.dsh', 'pixiv-duty', 'deepseek-key');
+      const apiKey = cfg.socialV2?.memory?.extractApiKey || (fs.existsSync(keyFile) ? fs.readFileSync(keyFile, 'utf8').trim() : '');
+      if (!apiKey) return;
+      const file = factsFile();
+      if (!file) return;
+      void (async () => {
+        try {
+          const r = await fetch('https://api.deepseek.com/chat/completions', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', authorization: 'Bearer ' + apiKey },
+            body: JSON.stringify({
+              model: cfg.socialV2?.memory?.extractModel || 'deepseek-chat',
+              messages: [
+                { role: 'system', content: '从对话中抽取 1~3 条长期有用的事实（人名、偏好、约定、重要事件）。只输出 JSON 数组，每项一句话，没有就输出 []。不要复述原话。' },
+                { role: 'user', content: msgs.join('\n') }
+              ],
+              temperature: 0.3,
+              max_tokens: 300
+            }),
+            signal: AbortSignal.timeout(30000)
+          });
+          if (!r.ok) return;
+          const j = await r.json();
+          const text = String(j.choices?.[0]?.message?.content ?? '');
+          const m = text.match(/\[[\s\S]*\]/);
+          if (!m) return;
+          const facts = JSON.parse(m[0]).filter((x) => typeof x === 'string' && x.trim()).slice(0, 3);
+          if (!facts.length) return;
+          const nowIso = new Date().toISOString();
+          const pending = facts.filter((f) => /约定|还没|没完成|下次|明天|回头|欠|要记得|提醒/.test(f));
+          const normal = facts.filter((f) => !pending.includes(f));
+          if (normal.length) {
+            fs.appendFileSync(file, normal.map((f) => JSON.stringify({ at: nowIso, source: key, fact: f.trim() })).join('\n') + '\n');
+          }
+          if (pending.length) {
+            const pf = pendingFile();
+            if (pf) fs.appendFileSync(pf, pending.map((f) => JSON.stringify({ at: nowIso, source: key, text: f.trim() })).join('\n') + '\n');
+            log(`[记忆] ${key} 记下 ${pending.length} 件未完成事项`);
+          }
+          log(`[记忆] ${key} 抽取 ${facts.length} 条事实`);
+        } catch { /* 静默 */ }
+      })();
+    } catch { /* 静默 */ }
+  }
+
+  // 记忆卡三段注入：连续性 / 近期 / 其它（各约 300 字），预算不变但结构清晰
+  function memoryBlocks(text) {
+    const paras = String(text || '').split(/\n{2,}/).map((x) => x.trim()).filter(Boolean);
+    const cont = [], recent = [], other = [];
+    for (const p of paras) {
+      if (/性格|相处|状态|情绪|在忙|没说完|欠|约定|习惯/.test(p)) cont.push(p);
+      else if (/今天|昨天|最近|这几天|刚才|昨晚|上次/.test(p)) recent.push(p);
+      else other.push(p);
+    }
+    const pick = (arr, max) => {
+      const out = [];
+      let n = 0;
+      for (const p of arr) {
+        if (n >= max) break;
+        out.push(p.slice(0, max - n));
+        n += p.length;
+      }
+      return out.join('\n').slice(0, max);
+    };
+    return {
+      continuity: pick(cont, 300),
+      recent: pick(recent, 300),
+      other: pick(other, 300),
+    };
+  }
+
   function memoryCardPromptBlock() {
     try {
       const stat = fs.statSync(MEMORY_CARD_PATHS.promptQq);
@@ -13663,6 +14235,66 @@ async function main() {
     return `【主人私聊授权：可发消息的群】\n管理员在私聊里可以让你往下面这些群发消息（用对应群的会话令牌；key 写 group:群号）。只在管理员明确要求时发，不要主动刷群。\n${lines.join('\n')}\n\n`;
   }
 
+  // ── 心情：四个值，向基线缓慢衰减，按对话内容微调（步长小，防止永远满格）──
+  const MOOD_KEYS = ['joy', 'irritation', 'boredom', 'excitement'];
+  const MOOD_BASE = 30;
+  function moodOf(st) {
+    const m = st.mood && typeof st.mood === 'object' ? st.mood : {};
+    const out = {};
+    for (const k of MOOD_KEYS) out[k] = Math.max(0, Math.min(100, Number(m[k]) || MOOD_BASE));
+    return out;
+  }
+  function updateMood(st, texts) {
+    const m = moodOf(st);
+    const at = Number(st.moodAt) || Date.now();
+    const hours = Math.max(0, (Date.now() - at) / 3600000);
+    for (const k of MOOD_KEYS) {
+      const d = (MOOD_BASE - m[k]) * Math.min(0.5, hours * 0.12);
+      m[k] = Math.round(m[k] + d);
+    }
+    const t = String(texts || '');
+    if (/谢|夸|好听|喜欢|可爱|厉害/.test(t)) { m.joy += 6; }
+    if (/滚|傻|笨|闭嘴|烦|讨厌/.test(t)) { m.irritation += 8; }
+    if (/哈哈|笑死|草|乐/.test(t)) { m.joy += 4; m.boredom -= 4; }
+    if (/无聊|没意思|水群/.test(t)) { m.boredom += 6; }
+    if (/新|买|抽|开箱|惊喜/.test(t)) { m.excitement += 5; }
+    for (const k of MOOD_KEYS) m[k] = Math.max(0, Math.min(100, Math.round(m[k])));
+    st.mood = m; st.moodAt = Date.now();
+    return m;
+  }
+  // 自动查梗：唤醒时后台扫最近消息里的生词，查 cnmeme，命中就存一句解释，下次注入
+  const memeProbeAt = new Map();
+  function queueMemeProbe(key, st) {
+    try {
+      if (Date.now() - (memeProbeAt.get(key) ?? 0) < 10 * 60 * 1000) return;
+      const texts = (st?.recentMessages ?? []).slice(-10).map((m) => String(m.text || '')).join(' ');
+      const freq = new Map();
+      for (const w of texts.match(/[\u4e00-\u9fa5]{2,6}/g) || []) freq.set(w, (freq.get(w) || 0) + 1);
+      const cands = [...freq.entries()].filter(([w, n]) => n >= 2).map(([w]) => w)
+        .filter((w) => !/[的了是在我你他她它们这那有不]/.test(w)).slice(0, 3);
+      if (!cands.length) return;
+      memeProbeAt.set(key, Date.now());
+      void (async () => {
+        for (const term of cands) {
+          try {
+            const r = await memeLookupV2(term);
+            if (r && r.matchQuality === 'strong' && r.title) {
+              st.memeHint = { term, text: String(r.summary || r.title).slice(0, 120), at: Date.now() };
+              log(`[梗] 自动命中 ${key}: ${term}`);
+              break;
+            }
+          } catch {}
+        }
+      })();
+    } catch {}
+  }
+
+  function moodLine(st) {
+    const m = moodOf(st);
+    const label = (v) => (v >= 70 ? '很强' : v >= 50 ? '明显' : v >= 30 ? '一般' : '很淡');
+    return `你现在的心情：开心${m.joy}/烦躁${m.irritation}/无聊${m.boredom}/兴奋${m.excitement}（${label(m.joy)}的开心，${label(m.irritation)}的烦躁）。语气跟着心情走，别演过头。`;
+  }
+
   function buildWakePromptV2(key, reason) {
     const roleState = readRoleState();
     const roleLine = roleState.role ? `【当前角色】${roleState.role}（完整角色卡请调用 qq_get_prompt 查看）\n\n` : '';
@@ -13927,6 +14559,7 @@ const base = roleLine + personaLine + identityLine + provenanceLine + adminLine 
     // 会话轮换（省 token）：QQ 会话上下文会越滚越大（实测单会话 30~50 万 tokens），
     // 每次唤醒都要重发整段历史。到阈值就退役当前 DSH 会话，后面 ensureSession 会建新的；
     // 桥接侧的 recentMessages / 记忆卡 / 人格卡都不动。
+    queueFactExtraction(key, st);
     const rot = cfg.socialV2?.sessionRotation ?? {};
     if (rot.enabled !== false) {
       const maxTurns = Math.max(20, Number(rot.maxTurns) || 120);
@@ -14653,6 +15286,40 @@ const base = roleLine + personaLine + identityLine + provenanceLine + adminLine 
     } catch {}
   }
 
+  /** 跑一次出刀表：spawn union.py，读 stdout 最后一行的 JSON。 */
+  function runNikkeUnion() {
+    return new Promise((resolve) => {
+      let done = false;
+      const finish = (v) => { if (!done) { done = true; resolve(v); } };
+      if (!fs.existsSync(NIKKE_UNION_SCRIPT)) { finish({ ok: false, error: 'union.py 不存在' }); return; }
+      if (!fs.existsSync(NIKKE_UNION_PY)) { finish({ ok: false, error: '找不到 python（pixiv-duty venv）' }); return; }
+      const child = spawn(NIKKE_UNION_PY, [NIKKE_UNION_SCRIPT], {
+        cwd: NIKKE_UNION_HOME,
+        env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1' }
+      });
+      let out = '';
+      let err = '';
+      const timer = setTimeout(() => {
+        try { child.kill('SIGKILL'); } catch { /* 已退出 */ }
+        finish({ ok: false, error: '查会战超时（30s）' });
+      }, 30000);
+      child.stdout.on('data', (d) => { out += d.toString(); });
+      child.stderr.on('data', (d) => { err += d.toString(); });
+      child.on('error', (e) => { clearTimeout(timer); finish({ ok: false, error: e?.message || String(e) }); });
+      child.on('close', (code) => {
+        clearTimeout(timer);
+        const line = out.trim().split('\n').filter(Boolean).pop() || '';
+        try {
+          const v = JSON.parse(line);
+          if (v && v.ok) finish(v);
+          else finish({ ok: false, error: v?.error || `脚本退出 ${code}` });
+        } catch {
+          finish({ ok: false, error: `输出不是 JSON（退出 ${code}）${err.slice(-160)}` });
+        }
+      });
+    });
+  }
+
   // QQ 消息 → DSH prompt
   async function handleIncoming(kind, id, event, cfg) {
     const key = convKey(kind, id);
@@ -14712,6 +15379,47 @@ const base = roleLine + personaLine + identityLine + provenanceLine + adminLine 
     const displayName = kind === 'group'
       ? (event.sender?.card || event.sender?.nickname || String(event.user_id))
       : '私聊';
+
+    // ── NIKKE 联盟突袭出刀表（固定口令；群内任何人可用，带群级/个人防刷）──────────
+    const nikkeCmdText = String(plainContent).replace(/@\S+\s*/g, '').replace(/[。！？!?，,\s]+$/g, '').trim();
+    const nikke = nikkeUnionSettings(cfg);
+    if (nikke.enabled && kind === 'group' && nikke.groups.includes(String(id))
+        && nikkeCmdText && nikke.keywords.includes(nikkeCmdText)) {
+      // 防刷：群级 2 分钟、个人 1 分钟；被挡时最多每 30 秒提示一次，提示本身也不许变成新刷屏。
+      const nowAt = Date.now();
+      const uid = String(event.user_id ?? '');
+      const userKey = `${key}:${uid}`;
+      const lastGroup = nikkeUnionAt.get(key) ?? 0;
+      const lastUser = nikkeUnionUserAt.get(userKey) ?? 0;
+      const wait = Math.max(0, nikke.groupCooldownMs - (nowAt - lastGroup),
+                            nikke.userCooldownMs - (nowAt - lastUser));
+      if (wait > 0) {
+        if (nowAt - (nikkeUnionNoticeAt.get(key) ?? 0) > nikke.noticeCooldownMs) {
+          nikkeUnionNoticeAt.set(key, nowAt);
+          await sendToQQ(key, `刚查过，${Math.ceil(wait / 1000)} 秒后再来。`);
+        }
+        return;
+      }
+      nikkeUnionAt.set(key, nowAt);
+      nikkeUnionUserAt.set(userKey, nowAt);
+      log(`[会战] ${key} 触发（${uid}）`);
+      const r = await runNikkeUnion();
+      if (!r.ok) {
+        log(`[会战] ${key} 失败：${r.error}`);
+        await sendToQQ(key, `查会战失败：${r.error}`);
+        return;
+      }
+      log(`[会战] ${key} 完成：${r.done}/${r.count}，未出刀 ${r.missing?.length ?? 0}`);
+      try {
+        const buf = fs.readFileSync(r.png);
+        await sendImageV2(key, { image: 'base64://' + buf.toString('base64') });
+      } catch (error) {
+        await sendToQQ(key, `出刀表图片发不出去：${error?.message ?? error}`);
+        return;
+      }
+      await sendToQQ(key, r.summary);
+      return;
+    }
     // 记忆卡原料：在静默/审批/命令等分支之前记录，避免「主人说的话没进记忆」。
     recordMemoryInboxEvent({ key, kind, event, plainContent, textContent, isOwner, quoteTargetIsSelf });
     if (kind === 'group') {
@@ -16071,6 +16779,12 @@ const base = roleLine + personaLine + identityLine + provenanceLine + adminLine 
     log(`SnowLuma 首次连接未成功（将在后台自动重连并尝试自愈 WS token）: ${error?.message ?? error}`);
   });
   log('桥接已启动。按 Ctrl+C 退出。');
+  {
+    // 启动时打一行，省得「改了配置没生效」还要猜：这里显示的就是运行期真正在用的值。
+    const nk = nikkeUnionSettings(cfg);
+    log(`[会战] 出刀表${nk.enabled ? '已启用' : '已关闭'}：群 ${nk.groups.join('、')}；`
+      + `口令 ${nk.keywords.join('/')}；冷却 ${nk.groupCooldownMs / 1000}s（群）/ ${nk.userCooldownMs / 1000}s（人）`);
+  }
   // 预热表情库：启动时同步一次 QQ 收藏表情，失败不阻塞（AI 首次调用工具时还会再试）。
   if (cfg.socialV2?.sticker?.enabled !== false) {
     syncStickerLibrary(true).catch((error) => log('启动预热表情库失败:', error?.message ?? error));

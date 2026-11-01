@@ -699,6 +699,24 @@ export function createBiliMemory({ stateDir, home = os.homedir(), log = () => {}
     return refreshing;
   }
 
+  // 兴趣加权：标题命中 interest.json 的 top tags 越多，越靠前
+  let interestTop = null;
+  function interestScore(e) {
+    try {
+      if (interestTop === null) {
+        const home = process.env.HOME || '';
+        const f = home + '/.dsh/surfcore/bili/interest.json';
+        const j = fs.existsSync(f) ? JSON.parse(fs.readFileSync(f, 'utf8')) : { tags: {} };
+        interestTop = Object.entries(j.tags || {}).sort((a, b) => b[1] - a[1]).slice(0, 20).map(([t]) => String(t).toLowerCase());
+      }
+      if (!interestTop.length) return 0;
+      const title = String(e?.title || e?.text || '').toLowerCase();
+      let n = 0;
+      for (const t of interestTop) if (t && title.includes(t)) n += 1;
+      return Math.min(6, n * 2);
+    } catch { return 0; }
+  }
+
   function briefBlock() {
     const brief = readBrief();
     return brief ? `${brief}\n` : '';
@@ -801,7 +819,7 @@ export function createBiliMemory({ stateDir, home = os.homedir(), log = () => {}
       .filter((e) => e.score >= 12 || e.favorite || (e.quote && e.quote.length >= 18) || (e.anecdote && e.anecdote.length >= 60) || (e.reason && e.reason.length >= 24))
       .filter((e) => (e.text || e.quote || e.reason || '').length >= 18)
       .filter((e) => !e.date || Date.now() - Date.parse(`${e.date}T00:00:00+08:00`) < 21 * 86400000)
-      .sort((a, b) => (b.priority || 0) - (a.priority || 0) || (b.score || 0) - (a.score || 0) || String(b.date).localeCompare(String(a.date)))
+      .sort((a, b) => (b.priority || 0) - (a.priority || 0) || (interestScore(b) - interestScore(a)) || (b.score || 0) - (a.score || 0) || String(b.date).localeCompare(String(a.date)))
       .slice(0, 16);
     if (!pool.length) return null;
     const fresh = pool.filter((e) => !(Date.parse(used[e.id] ?? 0) > cutoff));
