@@ -6724,6 +6724,7 @@ async function main() {
             recentCount: st.recentMessages.length,
             lastWakeReason: st.lastWakeReason,
             lastAiReplyAt: st.lastAiReplyAt,
+            ...(unreadNoticeV2(st) || {}),
             // 对话收尾：最近一次自然结束的位置 + 下次接法 + 是否还在冷却。
             closure: closureStatus(st.closure, Date.now()),
             closureAssessment: (() => {
@@ -6865,7 +6866,7 @@ async function main() {
           const readThroughSeq = req.headers['x-agent-token'] ? noteModelMessagesV2(st, messages) : readThroughSeqV2(st);
           // 翻未读是最常见的新消息入口，同样带上表情推荐
           const stickerMatch = stickerMatchFor(messages);
-          sendJson({ ok: true, key, unreadCount: st.unread.length, ...(stickerMatch ? { stickerMatch } : {}), messages, readThroughSeq });
+          sendJson({ ok: true, key, unreadCount: st.unread.length, ...(stickerMatch ? { stickerMatch } : {}), messages, readThroughSeq, ...(unreadNoticeV2(st) || {}) });
           return;
         }
         if (req.method === 'GET' && url.pathname === '/api/socialV2/recent') {
@@ -6881,7 +6882,7 @@ async function main() {
           const end = Math.max(0, st.recentMessages.length - offset);
           const messages = st.recentMessages.slice(start, end);
           const readThroughSeq = req.headers['x-agent-token'] ? noteModelMessagesV2(st, messages) : readThroughSeqV2(st);
-          sendJson({ ok: true, key, messages, readThroughSeq });
+          sendJson({ ok: true, key, messages, readThroughSeq, ...(unreadNoticeV2(st) || {}) });
           return;
         }
         if (req.method === 'POST' && url.pathname === '/api/socialV2/mark-read') {
@@ -8649,10 +8650,18 @@ async function main() {
             st.pendingWakeTimer = null;
           }
           cancelReplyCheckV2(key); // AI 正在主动等待，取消回复检查定时器避免重复唤醒
-          // A reply wait must also include messages received while the model
-          // was reading/thinking after its snapshot, before this HTTP request.
-          const requestSeq = st.lastUnreadSeq || 0;
-          const baseline = replyWait && (v2ToolEnabled('getUnread') || v2ToolEnabled('getRecent')) ? readThroughSeqV2(st) : requestSeq;
+          // 基线必须是「模型已经看过的水位」，不是「请求这一刻的 lastUnreadSeq」：
+          // 模型开始本轮 → 思考 → 才调 wait，这期间到的消息已经进了 unread，
+          // 旧写法会把它们算进基线，于是 wait 永远看不到、要等本轮结束再被重新投一遍。
+          // 只有「本回合正在进行」时才把基线降到模型已看水位：
+          // 回合外调用 wait 时仍按旧语义（只等请求之后的新消息），
+          // 避免把历史未读一次性倒给一个还没开始处理它们的回合。
+          const turnSid = state.sessions[key];
+          const turnActive = Boolean(turnSid) && Number(v2TurnStartAt.get(turnSid)) > 0;
+          const canReadHistory = v2ToolEnabled('getUnread') || v2ToolEnabled('getRecent');
+          const baseline = (replyWait || turnActive) && canReadHistory
+            ? readThroughSeqV2(st)
+            : (st.lastUnreadSeq || 0);
           const start = Date.now();
           let arrived = false;
           let lastNewAt = 0;
@@ -8740,10 +8749,12 @@ async function main() {
           // getUnread, the recent buffer by getRecent. A disabled switch must not leak
           // through either newMessages or the watermark, so the buffer is dropped
           // before arrival is judged -- not filtered afterwards.
-          const history = replyWait
-            ? [...(v2ToolEnabled('getUnread') ? st.unread : []),
-              ...(v2ToolEnabled('getRecent') ? st.recentMessages : [])]
-            : (Array.isArray(st.recentMessages) ? st.recentMessages : []);
+          // unread 也要能交给 wait：模型跑本轮时到的消息先落在 unread 里，
+          // 只读 recent 会漏掉它们（同上）。
+          const history = [
+            ...(v2ToolEnabled('getUnread') ? st.unread : []),
+            ...(v2ToolEnabled('getRecent') && Array.isArray(st.recentMessages) ? st.recentMessages : []),
+          ];
           const pending = [...new Map(history
             .filter((m) => m && !m.isSelf && (m.seq || 0) > baseline)
             .map((m) => [m.seq, m])).values()].sort((a, b) => a.seq - b.seq);
@@ -8751,6 +8762,7 @@ async function main() {
           // so a suppressed buffer cannot report an arrival it is not allowed to show.
           const newMessages = replyWait ? pending : (arrived ? pending : []);
           const readThroughSeq = req.headers['x-agent-token'] ? noteModelMessagesV2(st, newMessages) : readThroughSeqV2(st);
+          const unreadNotice = unreadNoticeV2(st);
           const lastNew = newMessages.length ? newMessages[newMessages.length - 1]
             : replyWait ? [...st.recentMessages].reverse().find((m) => m && !m.isSelf) : null;
           const lastMessageUnfinished = lastNew ? looksLikeUnfinished(String(lastNew.tail || lastNew.plain || lastNew.text || '')) : false;
@@ -8780,6 +8792,7 @@ async function main() {
             // the model should complete sleep observation before its first reply.
             ...(!replyWait ? { preSleepWaitMs, preSleepWaitRemainingMs: preSleepRemainingMs } : {}),
             ...(stickerMatch ? { stickerMatch } : {}),
+            ...(unreadNotice || {}),
             newMessages,
             readThroughSeq,
             unreadCount: st.unread.length
@@ -14076,6 +14089,27 @@ async function main() {
 
   // Only messages actually offered to the model authorize cursor-based acknowledgement.
   // Keep this receipt in memory: after a restart the model must fetch unread again.
+  /**
+   * 本轮「还没看过」的未读：seq 高于模型已看水位。
+   * 为什么需要它：回合进行中到的消息无法推进当前回合上下文（DSH 没有插话接口），
+   * 只能在每个工具返回里提醒模型「还有 N 条没看，想看就现在调 wait/unread」，
+   * 否则模型以为没消息，直接收尾，只能等 turn/end 再被唤醒一次。
+   */
+  function unseenUnreadV2(st) {
+    const through = readThroughSeqV2(st);
+    return (Array.isArray(st?.unread) ? st.unread : [])
+      .filter((m) => m && m.isSelf !== true && Number.isSafeInteger(m.seq) && m.seq > through);
+  }
+
+  function unreadNoticeV2(st) {
+    const unseen = unseenUnreadV2(st);
+    if (!unseen.length) return null;
+    return {
+      unseenCount: unseen.length,
+      unreadNotice: `还有 ${unseen.length} 条本轮还没看过的消息（seq ${unseen[0].seq}~${unseen[unseen.length - 1].seq}）。想看就现在调用 qq_wait_for_messages(purpose="messages") 或 qq_get_unread_messages，不要等下一轮。`,
+    };
+  }
+
   function readThroughSeqV2(st, additional = []) {
     const seen = new Set(st.modelSeenSeqs || []);
     for (const msg of additional) if (Number.isSafeInteger(msg?.seq) && msg.seq > 0) seen.add(msg.seq);

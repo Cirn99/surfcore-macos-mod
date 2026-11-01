@@ -139,6 +139,16 @@ node scripts/bili-footprint/stop.mjs            # 停止
 这台机器还有 `headless`（pixiv 值班用，本来就不该有这三条 MCP），按上游口径会把它算进 broken，
 真出问题时提示会指向错误的 profile。
 
+### 12. 回合中到达的消息（摘自上流 v0.8.3）
+
+现象：模型收到消息 → 思考 → 才调 `qq_wait_for_messages`，这中间到的消息当前回合看不到，只能等本轮结束再被重新投一遍。
+
+三处改动：
+
+- **基线**：回合进行中时用「模型已看水位」（`readThroughSeqV2`）而不是「请求这一刻的 lastUnreadSeq」；回合外保持旧语义
+- **history**：`wait` 同时读 `unread` + `recentMessages`（以前只读 recent，漏掉本轮先落进 unread 的消息）
+- **提醒**：`wait` / `get_unread` / `get_recent` / `状态` 的返回值里带 `unseenCount` + `unreadNotice`，模型看到「还有 N 条没看」就会当场再调一次，而不是收尾
+
 ## 安装
 
 安装流程与上游一致（`npm install` → `setup-dsh.mjs` → 重启 DSH → 诊断一键安装），差异和踩坑记在 [MODS.md](MODS.md)：
