@@ -1,3 +1,5 @@
+> ⚠️ **This English page is inherited from upstream SurfCore.** The macOS mod branch and its feature list are documented in [README.md](README.md) (Chinese).
+
 # SurfCore — QQ ↔ DeepSeek Harness Bridge + QQ × Bilibili plugin
 
 > ℹ️ This English page is a **condensed overview**. The full, code-level documentation
